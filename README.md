@@ -1,7 +1,7 @@
 ## What is cocos2dx-AdvancedRenderer?
 
-cocos2dx-AdvancedRenderer is a extended version of default Renderer class used
-by cocos2d-x. It adresses some flaws with the original Renderer (listed [here](http://discuss.cocos2d-x.org/t/flaws-with-renderer-glprogram-and-gl-state-management/26239)), and adds the possility of sending arbitrary vertex data to the Renderer.
+cocos2dx-AdvancedRenderer is an extended version of the default Renderer class used
+by cocos2d-x. It adresses some flaws with the original Renderer (listed [here](http://discuss.cocos2d-x.org/t/flaws-with-renderer-glprogram-and-gl-state-management/26239)), and adds the possibility of sending arbitrary vertex data to the Renderer.
 
 Features are:
 
@@ -27,7 +27,7 @@ Features are:
 To use an ArbitraryVertexCommand you first have to create a Material2D:
 
 ```
-Texture2d* texture = ...;
+Texture2D* texture = ...;
 GLProgramState* state = ....;
 VertexAttribInfoFormat format = ...;
 Material2D* material = new Material2D();
@@ -38,8 +38,8 @@ VertexAttribInfoFormats are created like this:
 
 ```
 VertexAttribInfoFormat format;
-format.infoCount = 2;
-format.infos = new VertexAttribInfo[format.infoCount];
+format.count = 2;
+format.infos = new VertexAttribInfo[format.count];
 format.infos[0] = {attrib_location_in_shader, element_count, element_type, normalized, vertex_stride, offset_of_vertex_attrib_in_vertex_data_in_bytes};
 ...
 // Example:  format.infos[0] = {0, 3, GL_FLOAT, GL_FALSE, 24, 0}
