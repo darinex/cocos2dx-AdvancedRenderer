@@ -131,7 +131,7 @@ void Material2D::generateMaterialId()
 
 		int j = 0;
 		for (int i = 7; i < size; i++) {
-			intArray[i] += _textureNames[i- 7];
+			intArray[i] += _textureNames[i - 7];
 		}
 		_id = XXH32(intArray, sizeof(intArray), 0);
 	}

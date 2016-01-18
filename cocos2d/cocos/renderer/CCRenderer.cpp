@@ -425,72 +425,111 @@ inline bool matrixEqual(Mat4* mat1, Mat4* mat2) {
 }
 
 void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands) {
-	ArbitraryVertexCommand::Data tempData;
-
 	_renderCommands->reserveElements(commands.size());
 
 	int j = 0;
 
 	for (auto i = commands.cbegin(); i < commands.cend(); i++, j++) {
 		auto type = (*i)->getType();
-		ArbitraryVertexCommand* avc = nullptr;
+		bool newQTMaterial = false;
+		bool newCommand = _lastWasFlushCommand;
+
+
+		// avc data
+		bool transformOnCpu = false;
+		ArbitraryVertexCommand::Data data;
+		ArbitraryVertexCommand::DrawInfo drawInfo;
+		Mat4 modelView;
+
+		int vertexDataSize = 0;
+
+		Material2D* currMaterial = nullptr;
 
 		if (type == RenderCommand::Type::ARBITRARY_VERTEX_COMMAND) {
-			avc = (ArbitraryVertexCommand*)(*i);
+			ArbitraryVertexCommand* avc = (ArbitraryVertexCommand*)(*i);
+			currMaterial = avc->_material2d;
+			transformOnCpu = avc->_transformOnCpu;
+			data = avc->_data;
+			modelView = avc->_mv;
+			drawInfo = avc->_info;
+			vertexDataSize = avc->getVertexDataSize();
+			_previousQuadOrTriangleCommand = false;
 		}
 		else if (type == RenderCommand::Type::TRIANGLES_COMMAND) {
-			// convert triangles command to ArbitaryVertexCommand
-			// NOTE: if you have lots of TrianglesCommands this could become a bottleneck
-
-			// TODO as there are needed a ArbitaryVertexCommand pointer and a Material pointer they are allocated here, then added to a list
-			// and then release at the end of the rendering process. Maybe use pooling instead here
 			TrianglesCommand* cmd = (TrianglesCommand*)(*i);
-			ArbitraryVertexCommand* tmpAvc = _avcPool1->pop();
-			Material2D* tempMaterial = _materialPool1->pop();
+			if (_previousQuadOrTriangleCommand) {
+				int matId = cmd->getMaterialID();
+				if (_currentQOrTMaterialId != matId) {
+					newQTMaterial = true;
+					_currentQOrTMaterialId = matId;
+				}
+			}
+			else {
+				newQTMaterial = true;
+				_previousQuadOrTriangleCommand = true;
+				_currentQOrTMaterialId = cmd->getMaterialID();
+			}
+			if (newQTMaterial) {
+				Material2D* material = _materialPool1->pop();
+				GLuint texId = cmd->getTextureID();
+				material->init(cmd->getGLProgramState(), &texId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
+				_materialPool2->push(material);
+				currMaterial = _currentQTMaterial = material;
+			}
+			else {
+				currMaterial = _currentQTMaterial;
+			}
 
-			GLuint textureId = cmd->getTextureID();
-			tempMaterial->init(cmd->getGLProgramState(), &textureId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
+			data.indexCount = drawInfo.indexCount = cmd->getIndexCount();
+			data.indexData = (unsigned short*)cmd->getIndices();
+			data.sizeOfVertex = sizeof(V3F_C4B_T2F);
+			data.vertexData = (byte*)cmd->getVertices();
+			data.vertexCount = drawInfo.vertexCount = cmd->getVertexCount();
+			vertexDataSize = data.sizeOfVertex * data.vertexCount;
+			modelView = cmd->getModelView();
 
-			tempData.indexCount = cmd->getIndexCount();
-			tempData.indexData = (unsigned short*)cmd->getIndices();
-			tempData.sizeOfVertex = sizeof(V3F_C4B_T2F);
-			tempData.vertexData = (byte*)cmd->getVertices();
-			tempData.vertexCount = cmd->getVertexCount();
-
-			tmpAvc->init(cmd->getGlobalOrder(), tempMaterial, tempData, cmd->getModelView());
-
-			// push to second pools
-			_avcPool2->push(tmpAvc);
-			_materialPool2->push(tempMaterial);
-
-			avc = tmpAvc;
+			transformOnCpu = true;
 		}
 		else if (type == RenderCommand::Type::QUAD_COMMAND) {
 			QuadCommand* cmd = (QuadCommand*)(*i);
-			ArbitraryVertexCommand* tmpAvc = _avcPool1->pop();
-			Material2D* tempMaterial = _materialPool1->pop();
+			if (_previousQuadOrTriangleCommand) {
+				int matId = cmd->getMaterialID();
+				if (_currentQOrTMaterialId != matId) {
+					newQTMaterial = true;
+					_currentQOrTMaterialId = matId;
+				}
+			}
+			else {
+				newQTMaterial = true;
+				_previousQuadOrTriangleCommand = true;
+				_currentQOrTMaterialId = cmd->getMaterialID();
+			}
+			if (newQTMaterial) {
+				Material2D* material = _materialPool1->pop();
+				GLuint texId = cmd->getTextureID();
+				material->init(cmd->getGLProgramState(), &texId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
+				_materialPool2->push(material);
+				currMaterial = _currentQTMaterial = material;
+			}
+			else {
+				currMaterial = _currentQTMaterial;
+			}
+			int quadCount = cmd->getQuadCount();
+			int indexCount = quadCount * 6;
+			CCASSERT(indexCount <= INDEX_VBO_SIZE, "QuadCommand too big");
 
-			GLuint textureId = cmd->getTextureID();
-			tempMaterial->init(cmd->getGLProgramState(), &textureId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
+			data.indexCount = drawInfo.indexCount = indexCount;
+			data.indexData = (unsigned short*)_quadIndices;
+			data.sizeOfVertex = sizeof(V3F_C4B_T2F);
+			data.vertexData = (byte*)cmd->getQuads();
+			data.vertexCount = drawInfo.vertexCount = quadCount * 4;
+			vertexDataSize = data.sizeOfVertex * data.vertexCount;
+			modelView = cmd->getModelView();
 
-			tempData.indexCount = 6 * cmd->getQuadCount();
-			tempData.indexData = (unsigned short*)_quadIndices;
-			tempData.sizeOfVertex = sizeof(V3F_C4B_T2F);
-			tempData.vertexData = (byte*)cmd->getQuads();
-			tempData.vertexCount = cmd->getQuadCount() * 4;
-
-			tmpAvc->init(cmd->getGlobalOrder(), tempMaterial, tempData, cmd->getModelView());
-
-			// push to second pools
-			_avcPool2->push(tmpAvc);
-			_materialPool2->push(tempMaterial);
-
-			avc = tmpAvc;
-		}
-		else if (type == RenderCommand::Type::ARBITRARY_VERTEX_COMMAND) {
-			avc = (ArbitraryVertexCommand*)(*i);
+			transformOnCpu = true;
 		}
 		else {
+			_lastWasFlushCommand = true;
 			if (type == RenderCommand::Type::GROUP_COMMAND) {
 				makeSingleRenderCommandList(_renderGroups[reinterpret_cast<GroupCommand*>(*i)->getRenderQueueID()]);
 				_renderCommands->reserveElements(commands.size() - j);
@@ -499,50 +538,61 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 			_renderCommands->push_back(*i);
 			continue;
 		}
+		_lastWasFlushCommand = false;
 
 		// process batching
 
-		bool transformOnCpu = avc->isTransformedOnCpu();
-		bool needsFilledVertexReset = _filledVertex + avc->_data.vertexCount > 0xFFFF; // check if vertex count exceeds max short value meaning the vertices could not be indexed anymore
-		bool needsNewBatch = false;
-
-		if (_currentVertexBufferOffset + avc->getVertexDataSize() > ARBITRARY_VBO_SIZE ||
-			_currentIndexBufferOffset + avc->_data.indexCount > ARBITRARY_INDEX_VBO_SIZE) {
+		// check if buffer limit is exceeded
+		if (_currentVertexBufferOffset + vertexDataSize > ARBITRARY_VBO_SIZE ||
+			_currentIndexBufferOffset + data.indexCount > ARBITRARY_INDEX_VBO_SIZE) {
 			CCASSERT(false, "Exceeding the index or vertex buffer size");
 		}
 
-
-		if (_lastArbitraryCommand == nullptr) {
-			nextVertexBatch();
-			_currentVertexBatch->material = avc->getMaterial();
-			_currentVertexBatch->startingRCIndex = 0;
+		if (_firstAVC) {
+			_currentVertexBatch->material = currMaterial;
+			_currentVertexBatch->endRCIndex = 0;
 			_currentVertexBatch->indexBufferOffset = 0;
+			_currentVertexBatch->startingRCIndex = 0;
 			_currentVertexBatch->vertexBufferOffset = 0;
-			_filledVertex = 0;
+			_lastMaterial_skipBatching = currMaterial->_skipBatching && currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
+			newCommand = true;
+			_firstAVC = false;
 		}
 		else {
+			bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF;
+			bool currMaterial_skipBatching = currMaterial->_skipBatching || currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
 			bool needFlushDueToDifferentMatrix = false;
 
+
 			if (_lastAVC_was_NCT) {
-				Mat4 modelView = avc->_mv;
-				if (!matrixEqual(&_lastAVC_NCT_Matrix, &modelView)) {
-					needFlushDueToDifferentMatrix = true;
-					_lastAVC_NCT_Matrix = modelView;
-				}
+				do {
+					if (transformOnCpu) {
+						needFlushDueToDifferentMatrix = true;
+						break;
+					}
+					if (!matrixEqual(&_lastAVC_NCT_Matrix, &modelView)) {
+						needFlushDueToDifferentMatrix = true;
+						_lastAVC_NCT_Matrix = modelView;
+					}
+				} while (0);
+			}
+			else if (!transformOnCpu) {
+				needFlushDueToDifferentMatrix = true;
+				_lastAVC_NCT_Matrix = modelView;
 			}
 
-			if (_lastArbitraryCommand->_material2d->getMaterialId() != avc->_material2d->getMaterialId() ||
-				_lastArbitraryCommand->_material2d->getMaterialId() == MATERIAL_ID_DO_NOT_BATCH ||
-				_lastArbitraryCommand->_skipBatching ||
-				avc->_material2d->getMaterialId() == MATERIAL_ID_DO_NOT_BATCH ||
-				avc->_skipBatching ||
+
+			if (currMaterial->_id != _currentMaterial2dId ||
+				currMaterial_skipBatching ||
+				_lastMaterial_skipBatching ||
 				needsFilledVertexReset ||
 				needFlushDueToDifferentMatrix) {
+
 				nextVertexBatch();
 				_previousVertexBatch->endRCIndex = _currentAVCommandCount;
-				_currentVertexBatch->material = avc->getMaterial();
+				_currentVertexBatch->material = currMaterial;
 				_currentVertexBatch->startingRCIndex = _currentAVCommandCount;
-				if (needsFilledVertexReset || _lastArbitraryCommand->_material2d->_vertexAttribFormat.id != avc->_material2d->_vertexAttribFormat.id) {
+				if (needsFilledVertexReset || _lastArbitraryCommand->_material2d->_vertexAttribFormat.id != currMaterial->_vertexAttribFormat.id) {
 					// if needsFilledVertexReset is set or the vertex attrib format from the previous material is different from the current use new vertex offset
 					_filledVertex = 0;
 					_currentVertexBatch->indexBufferOffset = _currentIndexBufferOffset;
@@ -552,17 +602,18 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 					_currentVertexBatch->indexBufferOffset = _previousVertexBatch->indexBufferOffset;
 					_currentVertexBatch->vertexBufferOffset = _previousVertexBatch->vertexBufferOffset;
 				}
+				newCommand = true;
 			}
 		}
 		_lastAVC_was_NCT = !transformOnCpu;
+		_currentMaterial2dId = currMaterial->_id;
 
-		memcpy(_currentVertexBuffer, avc->_data.vertexData, avc->getVertexDataSize());
+		memcpy(_currentVertexBuffer, data.vertexData, vertexDataSize);
 		if (transformOnCpu) {
 			// treat the first 12 byte (3 floats) as a Vec3 and transform it using the modelView
 			byte* ptr = _currentVertexBuffer;
-			byte* endPtr = ptr + avc->getVertexDataSize();
-			int stride = avc->_material2d->_vertexStride;
-			Mat4 modelView = avc->_mv;
+			byte* endPtr = ptr + vertexDataSize;
+			int stride = currMaterial->_vertexStride;
 			while (ptr < endPtr) {
 				Vec3* vec = reinterpret_cast<Vec3*>(ptr);
 				modelView.transformPoint(vec);
@@ -572,13 +623,13 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 		// copy index data
 		if (_filledVertex == 0) {
 			// special case when the vertex buffer offset is 0
-			memcpy(_currentIndexBuffer, avc->_data.indexData, sizeof(short) * avc->_data.indexCount);
+			memcpy(_currentIndexBuffer, data.indexData, sizeof(short) * data.indexCount);
 		}
 		else {
 			GLushort* ptr = _currentIndexBuffer;
-			GLushort* endPtr = ptr + avc->_data.indexCount;
+			GLushort* endPtr = ptr + data.indexCount;
 
-			GLushort* srcPtr = (GLushort*)avc->_data.indexData;
+			GLushort* srcPtr = (GLushort*)data.indexData;
 
 			while (ptr < endPtr) {
 				*(ptr++) = *(srcPtr++) + _filledVertex;
@@ -586,17 +637,30 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 		}
 
 		// adjust buffers and offset
-		_currentIndexBuffer += avc->_data.indexCount;
-		_currentVertexBuffer += avc->getVertexDataSize();
+		_currentIndexBuffer += data.indexCount;
+		_currentVertexBuffer += vertexDataSize;
 
-		_currentVertexBufferOffset += avc->getVertexDataSize();
-		_currentIndexBufferOffset += avc->_data.indexCount;
+		_currentVertexBufferOffset += vertexDataSize;
+		_currentIndexBufferOffset += data.indexCount;
 
-		_filledVertex += avc->_data.vertexCount;
+		_filledVertex += data.vertexCount;
 
-		_currentAVCommandCount++;
-		_lastArbitraryCommand = avc;
-		_renderCommands->push_back(avc);
+		if (newCommand) {
+			ArbitraryVertexCommand* avc = _avcPool1->pop();
+
+			// the data value doesnt really matters here
+			avc->init(0, currMaterial, data, modelView, transformOnCpu, drawInfo, 0);
+
+			_currentAVCommandCount++;
+			_lastArbitraryCommand = avc;
+			_renderCommands->push_back(avc);
+
+			_avcPool2->push(avc);
+		}
+		else {
+			_lastArbitraryCommand->_info.indexCount += drawInfo.indexCount;
+			_lastArbitraryCommand->_info.vertexCount += drawInfo.vertexCount;
+		}
 	}
 }
 
@@ -606,7 +670,7 @@ void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
 	CustomCommand* begin = _customCommandPool1->pop();
 	CustomCommand* end = _customCommandPool1->pop();
 
-	begin->func = CC_CALLBACK_0(RenderQueue::saveRenderState, queue);
+	begin->func = CC_CALLBACK_0(RenderQueue::saveRenderState, &queue);
 	_renderCommands->push_back(begin);
 
 	std::vector<RenderCommand*> queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_NEG);
@@ -635,7 +699,7 @@ void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
 		makeSingleRenderCommandList(queueEntrys);
 	}
 
-	end->func = CC_CALLBACK_0(RenderQueue::restoreRenderState, queue);
+	end->func = CC_CALLBACK_0(RenderQueue::restoreRenderState, &queue);
 	_renderCommands->push_back(end);
 
 	_customCommandPool2->push(begin);
@@ -648,6 +712,14 @@ void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
 
 void Renderer::initVertexGathering() {
 	_currentVertexBatchIndex = -1;
+	nextVertexBatch();
+
+	_previousQuadOrTriangleCommand = false;
+	_currentQOrTMaterialId = 0;
+	_currentMaterial2dId = 0;
+	_lastMaterial_skipBatching = false;
+	_firstAVC = true;
+	_lastWasFlushCommand = false;
 
 	_filledVertex = 0;
 	_filledIndex = 0;
@@ -821,8 +893,11 @@ void Renderer::render()
 		//3. map buffers
 		mapArbitraryBuffers();
 		//4. process render commands
-		for (auto i = _renderCommands->cbegin(); i < _renderCommands->cend(); i++) {
-			processRenderCommand((RenderCommand*)*i); // cast away the const
+		RenderCommand** commandPtr = const_cast<RenderCommand**>(_renderCommands->cbegin());
+		RenderCommand** endPtr = const_cast<RenderCommand**>(_renderCommands->cend());
+
+		while (commandPtr < endPtr) {
+			processRenderCommand(*(commandPtr++)); // cast away the const
 		}
 	}
 	clean();

@@ -305,6 +305,14 @@ protected:
 	ssize_t _currentVertexBufferOffset;
 	ssize_t _currentIndexBufferOffset;
 
+	bool _previousQuadOrTriangleCommand;
+	uint32_t _currentQOrTMaterialId;
+	Material2D* _currentQTMaterial;
+	uint32_t _currentMaterial2dId;
+	bool _lastMaterial_skipBatching = false;
+	bool _lastWasFlushCommand;
+	bool _firstAVC = false;
+
 	int _usedBatchesCount;
 
 	bool _lastAVC_was_NCT; // short version for : last ArbitaryVertexCommand was Non Cpu Transform
