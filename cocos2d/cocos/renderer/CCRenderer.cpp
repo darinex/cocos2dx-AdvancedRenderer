@@ -425,15 +425,12 @@ inline bool matrixEqual(Mat4* mat1, Mat4* mat2) {
 }
 
 void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands) {
-	_renderCommands->reserveElements(commands.size());
-
 	int j = 0;
 
 	for (auto i = commands.cbegin(); i < commands.cend(); i++, j++) {
 		auto type = (*i)->getType();
 		bool newQTMaterial = false;
 		bool newCommand = _lastWasFlushCommand;
-
 
 		// avc data
 		bool transformOnCpu = false;
@@ -492,6 +489,8 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 		}
 		else if (type == RenderCommand::Type::QUAD_COMMAND) {
 			QuadCommand* cmd = (QuadCommand*)(*i);
+			// if the previous command was a quad or triangle command, check if they had the same material id.
+			// If yes that means that there is no need to create a new material, just reuse the last one.
 			if (_previousQuadOrTriangleCommand) {
 				int matId = cmd->getMaterialID();
 				if (_currentQOrTMaterialId != matId) {
@@ -512,6 +511,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 				currMaterial = _currentQTMaterial = material;
 			}
 			else {
+				// if the quad or triangle command material does not differ from the previous, reuse the previous one
 				currMaterial = _currentQTMaterial;
 			}
 			int quadCount = cmd->getQuadCount();
@@ -535,6 +535,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 				_renderCommands->reserveElements(commands.size() - j);
 				continue;
 			}
+			_renderCommands->reserveElements(1);
 			_renderCommands->push_back(*i);
 			continue;
 		}
@@ -559,11 +560,14 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 			_firstAVC = false;
 		}
 		else {
-			bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF;
+			bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF; // meaning no index(short) could adress it anymore
 			bool currMaterial_skipBatching = currMaterial->_skipBatching || currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
 			bool needFlushDueToDifferentMatrix = false;
 
-
+			// check if there need to be new batch due to different transform mode:
+			// last command was cpu-transform and new one isnt -> new batch
+			// last command was non-cpu-transform and new one is -> new batch
+			// last command and new command are cpu-transformed, but dont share the same modelview -> new batch
 			if (_lastAVC_was_NCT) {
 				do {
 					if (transformOnCpu) {
@@ -581,15 +585,21 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 				_lastAVC_NCT_Matrix = modelView;
 			}
 
-
+			// check if:
+			// curr material id differs from previous?
+			// either curr or prev materials skipped batching?
+			// there needs to be a _filledVertex reset
+			// the above check returned new batch
 			if (currMaterial->_id != _currentMaterial2dId ||
 				currMaterial_skipBatching ||
 				_lastMaterial_skipBatching ||
 				needsFilledVertexReset ||
 				needFlushDueToDifferentMatrix) {
-
+				// go to next vertex batch
 				nextVertexBatch();
+				// set the previous vertex batch end render command index
 				_previousVertexBatch->endRCIndex = _currentAVCommandCount;
+				// set material and starting render command index
 				_currentVertexBatch->material = currMaterial;
 				_currentVertexBatch->startingRCIndex = _currentAVCommandCount;
 				if (needsFilledVertexReset || _lastArbitraryCommand->_material2d->_vertexAttribFormat.id != currMaterial->_vertexAttribFormat.id) {
@@ -599,6 +609,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 					_currentVertexBatch->vertexBufferOffset = _currentVertexBufferOffset;
 				}
 				else {
+					// use the offsets from the previous one
 					_currentVertexBatch->indexBufferOffset = _previousVertexBatch->indexBufferOffset;
 					_currentVertexBatch->vertexBufferOffset = _previousVertexBatch->vertexBufferOffset;
 				}
@@ -645,6 +656,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 
 		_filledVertex += data.vertexCount;
 
+		// if newCommand is set create a new avc and init it
 		if (newCommand) {
 			ArbitraryVertexCommand* avc = _avcPool1->pop();
 
@@ -653,11 +665,13 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 
 			_currentAVCommandCount++;
 			_lastArbitraryCommand = avc;
+			_renderCommands->reserveElements(1);
 			_renderCommands->push_back(avc);
 
 			_avcPool2->push(avc);
 		}
 		else {
+			// if not, just add the data to the previous one
 			_lastArbitraryCommand->_info.indexCount += drawInfo.indexCount;
 			_lastArbitraryCommand->_info.vertexCount += drawInfo.vertexCount;
 		}
@@ -676,26 +690,31 @@ void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
 	std::vector<RenderCommand*> queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_NEG);
 	if (queueEntrys.size() > 0) {
 		_renderCommands->push_back(_beginQueue2dCommand);
+		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::OPAQUE_3D);
 	if (queueEntrys.size() > 0) {
 		_renderCommands->push_back(_beginQueueOpaqueCommand);
+		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::TRANSPARENT_3D);
 	if (queueEntrys.size() > 0) {
 		_renderCommands->push_back(_beginQueueTransparentCommand);
+		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_ZERO);
 	if (queueEntrys.size() > 0) {
 		_renderCommands->push_back(_beginQueue2dCommand);
+		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_POS);
 	if (queueEntrys.size() > 0) {
 		_renderCommands->push_back(_beginQueue2dCommand);
+		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 
@@ -1018,6 +1037,7 @@ void Renderer::drawBatchedArbitaryVertices() {
 	int endDrawnRenderCommands = _currentDrawnRenderCommands + _batchedArbitaryCommands.size();
 
 	int indexToDraw = 0;
+	int vertexCount = 0;
 
 	VertexBatch* batch = _vertexBatches + _currentDrawnVertexBatches;
 

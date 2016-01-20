@@ -14,7 +14,11 @@ ArbitraryVertexCommand::~ArbitraryVertexCommand()
 void ArbitraryVertexCommand::init(float globalOrder, Material2D * material2d, ArbitraryVertexCommand::Data& data, const Mat4 & mv, bool transformOnCpu, DrawInfo drawInfo, uint32_t flags)
 {
 	CCASSERT(material2d, "Invalid Material2D");
-	CCASSERT(transformOnCpu && material2d->getVertexStride() >= 12, "To be transformed on the cpu the vertex stride of the given vertex data must be greater than 12");
+	if (transformOnCpu) {
+		if (material2d->getVertexStride() < 12) {
+			CCASSERT(false, "To be transformed on the cpu the vertex stride of the given vertex data must be greater than 12");
+		}
+	}
 
 	if (material2d->getProgramState()->getVertexAttribsFlags() != 0) {
 		cocos2d::log("Custom attributes of this material's shader are ignored.\nIf you want to set custom attributes, do that through the VertexAttribFormat parameter in Material2Ds initialization");
@@ -30,6 +34,8 @@ void ArbitraryVertexCommand::init(float globalOrder, Material2D * material2d, Ar
 	if (drawInfo.vertexCount == DRAW_INFO_AUTO_FILL) {
 		_info.vertexCount = data.vertexCount;
 	}
+
+	CCASSERT(_info.indexCount > 0 && _info.vertexCount > 0, "Vertex count and index count must be greater than 0");
 
 	_data = data;
 	_mv = mv;
