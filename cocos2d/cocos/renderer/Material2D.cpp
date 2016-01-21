@@ -42,6 +42,15 @@ void VertexAttribInfoFormat::apply(void* bufferOffset)
 	}
 }
 
+VertexAttribInfoFormat::VertexAttribInfoFormat() {
+	id = 0;
+	count = 0;
+	infos = nullptr;
+}
+
+VertexAttribInfoFormat::~VertexAttribInfoFormat() {
+}
+
 Material2D::Material2D()
 {
 }
@@ -121,7 +130,9 @@ void Material2D::generateMaterialId()
 		_id = Renderer::MATERIAL_ID_DO_NOT_BATCH;
 	}
 	else {
-		_vertexAttribFormat.generateID();
+		if (_vertexAttribFormat.id == 0) { // 0 could be a valid id too but its used as a non-initialize indicator
+			_vertexAttribFormat.generateID();
+		}
 		int formatId = _vertexAttribFormat.id;
 		int glProgram = (int)_glProgramState->getGLProgram()->getProgram();
 

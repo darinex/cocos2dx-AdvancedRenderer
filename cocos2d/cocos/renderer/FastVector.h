@@ -26,8 +26,20 @@ public:
 		list[elementCount++] = obj;
 		reserveIndex = MAX(reserveIndex, elementCount);
 	}
+	inline void push_back_resize(T obj) {
+		if (elementCount + 1 > listSize) {
+			listSize = listSize * 1.3f;
+			list = (T*)realloc(list, sizeof(T) * listSize);
+		}
+		list[elementCount++] = obj;
+		reserveIndex = MAX(reserveIndex, elementCount);
+	}
 	inline T at(size_t index) const {
 		return list[index];
+	}
+
+	inline T* pointerAt(size_t index) {
+		return list + index;
 	}
 
 	void clear() {

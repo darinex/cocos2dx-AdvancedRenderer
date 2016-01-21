@@ -171,9 +171,6 @@ public:
 	/**Reserved for material id, which means that the command could not be batched.*/
 	static const int MATERIAL_ID_DO_NOT_BATCH = 0;
 
-	static const int MAX_VERTEX_BATCH_COUNT_PER_VBO = 100;
-
-	static const int MAX_ARBITARY_VBO_COUNT = 5;
 	/**Constructor.*/
 	Renderer();
 	/**Destructor.*/
@@ -335,12 +332,11 @@ protected:
 
 	byte _arbitraryVertexBuffer[ARBITRARY_VBO_SIZE];
 	unsigned short _arbitraryIndexBuffer[ARBITRARY_INDEX_VBO_SIZE];
-	VertexBatch _vertexBatches[MAX_VERTEX_BATCH_COUNT_PER_VBO];
+	FastVector<VertexBatch>* _vertexBatches;
 
 	int _currentAVCommandCount;
 
 	VertexAttribInfoFormat _triangleCommandVAIL;
-	VertexAttribInfoFormat _quadCommandVAIL;
 
 	int _currentDrawnVertexBatches;
 	int _currentDrawnRenderCommands;

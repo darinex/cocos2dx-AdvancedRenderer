@@ -247,8 +247,9 @@ Renderer::Renderer()
 	_clearColor = Color4F::BLACK;
 
 	_renderCommands = new FastVector<RenderCommand*>();
+	_vertexBatches = new FastVector<VertexBatch>();
 
-	// init all pool
+	// init all pools
 	_avcPool1 = new FastPool<ArbitraryVertexCommand*>(&newArbitraryVertexCommand);
 	_avcPool2 = new FastPool<ArbitraryVertexCommand*>(&newArbitraryVertexCommand);
 
@@ -276,12 +277,7 @@ Renderer::Renderer()
 
 	_triangleCommandVAIL.infos = tc_vail_infos;
 	_triangleCommandVAIL.count = 3;
-
-	VertexAttribInfo* qc_vail_infos = new VertexAttribInfo[3];
-	memcpy(qc_vail_infos, tc_vail_infos, sizeof(VertexAttribInfo) * 3);
-
-	_quadCommandVAIL.infos = qc_vail_infos;
-	_quadCommandVAIL.count = 3;
+	_triangleCommandVAIL.generateID();
 
 	// TODO move to own function
 }
@@ -290,6 +286,21 @@ Renderer::~Renderer()
 {
 	_renderGroups.clear();
 	_groupCommandManager->release();
+
+	delete _renderCommands;
+	delete _vertexBatches;
+
+	// init all pools
+	delete _avcPool1;
+	delete _avcPool2;
+
+	delete _materialPool1;
+	delete _materialPool2;
+
+	delete _customCommandPool1;
+	delete _customCommandPool2;
+
+	delete[] _triangleCommandVAIL.infos;
 
 	glDeleteBuffers(2, _aBuffersVBO);
 
@@ -403,24 +414,21 @@ int Renderer::createRenderQueue()
 }
 
 void Renderer::nextVertexBatch() {
-	_previousVertexBatch = &_vertexBatches[_currentVertexBatchIndex];
+	_previousVertexBatch = _vertexBatches->pointerAt(_currentVertexBatchIndex);
+	_vertexBatches->push_back_resize(VertexBatch());
 	_currentVertexBatchIndex++;
-	if (_currentVertexBatchIndex >= MAX_VERTEX_BATCH_COUNT_PER_VBO) {
-		CCASSERT(false, "Exceeding the vertex batch count");
-	}
-	_currentVertexBatch = &_vertexBatches[_currentVertexBatchIndex];
+	_currentVertexBatch = _vertexBatches->pointerAt(_currentVertexBatchIndex);
 }
 
-// using pointers is faster than passing by reference
 inline bool matrixEqual(Mat4* mat1, Mat4* mat2) {
 	float* m1 = mat1->m;
 	float* m2 = mat2->m;
 	float* me = m1 + 16;
 	do {
-		if (*m1 != *m2) {
+		if (*(m1++) != *(m2++)) {
 			return false;
 		}
-	} while (++m1 < me);
+	} while (m1 < me);
 	return true;
 }
 
@@ -535,8 +543,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 				_renderCommands->reserveElements(commands.size() - j);
 				continue;
 			}
-			_renderCommands->reserveElements(1);
-			_renderCommands->push_back(*i);
+			_renderCommands->push_back_resize(*i);
 			continue;
 		}
 		_lastWasFlushCommand = false;
@@ -665,8 +672,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 
 			_currentAVCommandCount++;
 			_lastArbitraryCommand = avc;
-			_renderCommands->reserveElements(1);
-			_renderCommands->push_back(avc);
+			_renderCommands->push_back_resize(avc);
 
 			_avcPool2->push(avc);
 		}
@@ -908,7 +914,7 @@ void Renderer::render()
 		//	3. create batching data
 		initVertexGathering();
 		makeSingleRenderCommandList(_renderGroups[0]);
-		_vertexBatches[_currentVertexBatchIndex].endRCIndex = _currentAVCommandCount;
+		_vertexBatches->pointerAt(_currentVertexBatchIndex)->endRCIndex = _currentAVCommandCount;
 		//3. map buffers
 		mapArbitraryBuffers();
 		//4. process render commands
@@ -936,6 +942,7 @@ void Renderer::clean()
 		_renderGroups[j].clear();
 	}
 
+	_vertexBatches->clear();
 	_renderCommands->clear();
 
 	// Clear batch commands
@@ -1028,21 +1035,16 @@ void Renderer::mapArbitraryBuffers() {
 void Renderer::drawBatchedArbitaryVertices() {
 	glBindBuffer(GL_ARRAY_BUFFER, _aBuffersVBO[0]);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBuffersVBO[1]);
-	// enable and set vertex attribs
-	{
-		_vertexBatches[_currentDrawnVertexBatches].material->_vertexAttribFormat.apply((GLvoid*)_vertexBatches[_currentDrawnVertexBatches].vertexBufferOffset);
-		_vertexBatches[_currentDrawnVertexBatches].material->apply(Mat4::IDENTITY);
-	}
 
 	int endDrawnRenderCommands = _currentDrawnRenderCommands + _batchedArbitaryCommands.size();
 
 	int indexToDraw = 0;
 	int vertexCount = 0;
 
-	VertexBatch* batch = _vertexBatches + _currentDrawnVertexBatches;
+	VertexBatch* batch = _vertexBatches->pointerAt(_currentDrawnVertexBatches);
 
-	bool bindMaterial = false;
-	bool applyVertexAttribFormat = false;
+	bool bindMaterial = true;
+	bool applyVertexAttribFormat = true;
 
 	auto avcPtr = _batchedArbitaryCommands.begin();
 
@@ -1050,7 +1052,7 @@ void Renderer::drawBatchedArbitaryVertices() {
 		CCASSERT(_currentDrawnRenderCommands < _currentAVCommandCount, "Something went really wrong");
 		ArbitraryVertexCommand* avc = reinterpret_cast<ArbitraryVertexCommand*>(*avcPtr);
 		if (bindMaterial) {
-			_vertexBatches[_currentDrawnVertexBatches].material->apply(avc->_mv);
+			batch->material->apply(avc->_mv);
 			if (applyVertexAttribFormat) {
 				batch->material->_vertexAttribFormat.apply((GLvoid*)batch->vertexBufferOffset);
 			}
@@ -1074,7 +1076,7 @@ void Renderer::drawBatchedArbitaryVertices() {
 				break;
 			}
 
-			VertexBatch* newBatch = _vertexBatches + _currentDrawnVertexBatches;
+			VertexBatch* newBatch = _vertexBatches->pointerAt(_currentDrawnVertexBatches);
 
 			if (newBatch->vertexBufferOffset != batch->vertexBufferOffset) {
 				// this means that the vertex attrib format must be changed

@@ -30,10 +30,13 @@ struct VertexAttribInfo {
 	GLuint offset;
 };
 
-struct VertexAttribInfoFormat {
+struct CC_DLL VertexAttribInfoFormat {
 	VertexAttribInfo* infos;
 	unsigned int count;
 	uint32_t id;
+
+	VertexAttribInfoFormat();
+	~VertexAttribInfoFormat();
 
 	void generateID();
 	void apply(void* bufferOffset);
