@@ -434,6 +434,8 @@ inline bool matrixEqual(Mat4* mat1, Mat4* mat2) {
 
 void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands) {
 	int j = 0;
+	// dont use with push_back_resize: some weird realloc error occurs
+	//_renderCommands->reserveElements(commands.size());
 
 	for (auto i = commands.cbegin(); i < commands.cend(); i++, j++) {
 		auto type = (*i)->getType();
@@ -540,7 +542,7 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 			_lastWasFlushCommand = true;
 			if (type == RenderCommand::Type::GROUP_COMMAND) {
 				makeSingleRenderCommandList(_renderGroups[reinterpret_cast<GroupCommand*>(*i)->getRenderQueueID()]);
-				_renderCommands->reserveElements(commands.size() - j);
+				//_renderCommands->reserveElements(commands.size() - j);
 				continue;
 			}
 			_renderCommands->push_back_resize(*i);
@@ -685,47 +687,47 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 }
 
 void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
-	_renderCommands->reserveElements(7);
+	//_renderCommands->reserveElements(7);
 
 	CustomCommand* begin = _customCommandPool1->pop();
 	CustomCommand* end = _customCommandPool1->pop();
 
 	begin->func = CC_CALLBACK_0(RenderQueue::saveRenderState, &queue);
-	_renderCommands->push_back(begin);
+	_renderCommands->push_back_resize(begin);
 
 	std::vector<RenderCommand*> queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_NEG);
 	if (queueEntrys.size() > 0) {
-		_renderCommands->push_back(_beginQueue2dCommand);
+		_renderCommands->push_back_resize(_beginQueue2dCommand);
 		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::OPAQUE_3D);
 	if (queueEntrys.size() > 0) {
-		_renderCommands->push_back(_beginQueueOpaqueCommand);
+		_renderCommands->push_back_resize(_beginQueueOpaqueCommand);
 		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::TRANSPARENT_3D);
 	if (queueEntrys.size() > 0) {
-		_renderCommands->push_back(_beginQueueTransparentCommand);
+		_renderCommands->push_back_resize(_beginQueueTransparentCommand);
 		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_ZERO);
 	if (queueEntrys.size() > 0) {
-		_renderCommands->push_back(_beginQueue2dCommand);
+		_renderCommands->push_back_resize(_beginQueue2dCommand);
 		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 	queueEntrys = queue.getSubQueue(RenderQueue::QUEUE_GROUP::GLOBALZ_POS);
 	if (queueEntrys.size() > 0) {
-		_renderCommands->push_back(_beginQueue2dCommand);
+		_renderCommands->push_back_resize(_beginQueue2dCommand);
 		_lastWasFlushCommand = true;
 		makeSingleRenderCommandList(queueEntrys);
 	}
 
 	end->func = CC_CALLBACK_0(RenderQueue::restoreRenderState, &queue);
-	_renderCommands->push_back(end);
+	_renderCommands->push_back_resize(end);
 
 	_customCommandPool2->push(begin);
 	_customCommandPool2->push(end);
