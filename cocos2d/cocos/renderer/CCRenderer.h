@@ -135,22 +135,18 @@ typedef unsigned char byte;
 struct VertexBatch {
 	int startingRCIndex; // index indicating at which position this attribs should be used
 	int endRCIndex; // index indicating at which position the next RenderCommandsVertexAttribInfo should be used
-	GLuint vertexBufferOffset; // an offset into the vbo
-	GLuint indexBufferOffset;
+	ssize_t vertexBufferOffset; // an offset into the vbo
+	ssize_t vertexBufferOffsetEnd;
+	GLuint vertexBufferHandle;
+	ssize_t indexBufferOffset;
+	ssize_t indexBufferOffsetEnd;
+	GLuint indexBufferHandle;
+
 	Material2D* material;
 };
 
-// holds the index and vertex buffer vbo and data, and the VertexBatches that uses this vbo
-struct VBOBatches {
-	ssize_t vertexBufferSize;
-	ssize_t indexBufferSize;
-	GLuint vertexVBO;
-	GLuint indexVBO;
-	VertexBatch* batches;
-	int batchesCount;
-	byte* vertexBuffer;
-	GLushort* indexBuffer;
-	int renderCommandCount;
+struct VertexIndexBO {
+	GLuint buffers[2];
 };
 
 class QueueCommand;
@@ -272,6 +268,11 @@ protected:
 	void beginQueue2d();
 	void beginQueueOpaque();
 
+	inline int nextVBO() { return _vboIndex = (_vboIndex + 1) % _vboCount; }
+
+	bool _isBufferSlicing;
+	bool _currentVBOIsWritten;
+
 	// pool and vector stuff
 
 	FastPool<ArbitraryVertexCommand*>* _avcPool1;
@@ -295,7 +296,15 @@ protected:
 	VertexBatch* _currentVertexBatch;
 	VertexBatch* _previousVertexBatch;
 
+	ssize_t _lastVertexBufferSlicePos;
+
 	int _currentVertexBatchIndex;
+
+	// this value is used for a loose round-robin approach, may not be less than 1
+	float _vboCountMultiplier;
+	ssize_t _vboVertexResetThreshold;
+	ssize_t _vboByteSlice;
+	unsigned int _vboCount;
 
 	byte* _currentVertexBuffer;
 	GLushort* _currentIndexBuffer;
@@ -328,7 +337,8 @@ protected:
 	std::vector<RenderCommand*> _batchedArbitaryCommands;
 
 	// for arbitaryDrawing
-	GLuint _aBuffersVBO[2];
+	VertexIndexBO* _aBufferVBOs;
+	int _vboIndex;
 
 	byte _arbitraryVertexBuffer[ARBITRARY_VBO_SIZE];
 	unsigned short _arbitraryIndexBuffer[ARBITRARY_INDEX_VBO_SIZE];

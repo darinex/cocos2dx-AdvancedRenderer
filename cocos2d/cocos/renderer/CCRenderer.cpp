@@ -246,6 +246,12 @@ Renderer::Renderer()
 	// default clear color
 	_clearColor = Color4F::BLACK;
 
+#if (CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 && CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 && CC_TARGET_PLATFORM != CC_PLATFORM_WIN32)
+	_isBufferSlicing = true;
+#else
+	_isBufferSlicing = false;
+#endif
+
 	_renderCommands = new FastVector<RenderCommand*>();
 	_vertexBatches = new FastVector<VertexBatch>();
 
@@ -269,6 +275,8 @@ Renderer::Renderer()
 
 	// other
 
+	_vboIndex = 0;
+
 	// create vertex layouts
 	VertexAttribInfo* tc_vail_infos = new VertexAttribInfo[3];
 	tc_vail_infos[0] = { GLProgram::VERTEX_ATTRIB_POSITION, 3, GL_FLOAT, false, sizeof(V3F_C4B_T2F), offsetof(V3F_C4B_T2F, vertices) };
@@ -279,7 +287,16 @@ Renderer::Renderer()
 	_triangleCommandVAIL.count = 3;
 	_triangleCommandVAIL.generateID();
 
-	// TODO move to own function
+	// init all vbo related stuff
+	// TODO read the following values from a file
+	_vboByteSlice = 100000;
+	_vboCountMultiplier = 1.3f;
+	_vboVertexResetThreshold = 20000;
+
+	// this data is renderer computed
+	_vboCount = (int)ceilf(ARBITRARY_VBO_SIZE / (float)_vboByteSlice);
+
+	_aBufferVBOs = new VertexIndexBO[_vboCount];
 }
 
 Renderer::~Renderer()
@@ -302,7 +319,11 @@ Renderer::~Renderer()
 
 	delete[] _triangleCommandVAIL.infos;
 
-	glDeleteBuffers(2, _aBuffersVBO);
+	for (unsigned int i = 0; i < _vboCount; i++) {
+		glDeleteBuffers(2, &_aBufferVBOs[i].buffers[0]);
+	}
+
+	delete[] _aBufferVBOs;
 
 #if CC_ENABLE_CACHE_TEXTURE_DATA
 	Director::getInstance()->getEventDispatcher()->removeEventListener(_cacheTextureListener);
@@ -334,45 +355,38 @@ void Renderer::initGLView()
 
 	setupBuffer();
 
+#if (CC_TARGET_PLATFORM == CC_PLATFORM_WIN32 || CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 || CC_TARGET_PLATFORM != CC_PLATFORM_WIN32)
+	// only use glMapBuffer on desktop platforms as it is used with buffer orphaning, and buffer orphaning could be slow with really big data on mobile devices
 	_useMapBuffer = Configuration::getInstance()->checkForGLExtension("map_buffer");
+#endif
 
 	_glViewAssigned = true;
 }
 
 void Renderer::setupBuffer()
 {
-	if (Configuration::getInstance()->supportsShareableVAO())
-	{
-		setupVBOAndVAO();
-	}
-	else
-	{
-		setupVBO();
-	}
+	setupVBO();
 }
 
 void Renderer::setupVBOAndVAO()
 {
-	// generate vbo for ArbitraryVertexCommand
-
-	glGenBuffers(2, _aBuffersVBO);
-
-	glBindBuffer(GL_ARRAY_BUFFER, _aBuffersVBO[0]);
-	glBufferData(GL_ARRAY_BUFFER, ARBITRARY_VBO_SIZE, _arbitraryVertexBuffer, GL_STREAM_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBuffersVBO[1]);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, ARBITRARY_INDEX_VBO_SIZE, _arbitraryIndexBuffer, GL_STREAM_DRAW);
-
-	CHECK_GL_ERROR_DEBUG();
 }
 
 void Renderer::setupVBO()
 {
-	glGenBuffers(2, &_aBuffersVBO[0]);
+	int vboSize = ARBITRARY_VBO_SIZE / _vboCount;
+	int iboSize = ARBITRARY_INDEX_VBO_SIZE / _vboCount;
+	for (unsigned int i = 0; i < _vboCount; i++) {
+		GLuint* buffers = &_aBufferVBOs[i].buffers[0];
+		glGenBuffers(2, buffers);
 
-	glBindBuffer(GL_ARRAY_BUFFER, _aBuffersVBO[0]);
-	glBufferData(GL_ARRAY_BUFFER, ARBITRARY_VBO_SIZE, _arbitraryVertexBuffer, GL_STREAM_DRAW);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBuffersVBO[1]);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, ARBITRARY_INDEX_VBO_SIZE, _arbitraryIndexBuffer, GL_STREAM_DRAW);
+		glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+		glBufferData(GL_ARRAY_BUFFER, vboSize, _arbitraryVertexBuffer, GL_STREAM_DRAW);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffers[1]);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, iboSize, _arbitraryIndexBuffer, GL_STREAM_DRAW);
+	}
+
+	CHECK_GL_ERROR_DEBUG();
 }
 
 void Renderer::mapBuffers()
@@ -569,7 +583,22 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 			_firstAVC = false;
 		}
 		else {
+
 			bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF; // meaning no index(short) could adress it anymore
+
+			if (_isBufferSlicing) {
+				bool vboFull = ((_currentVertexBufferOffset + vertexDataSize) - _lastVertexBufferSlicePos) > _vboByteSlice;
+				needsFilledVertexReset |= vboFull;
+
+				if (vboFull) {
+					if (currMaterial->_vertexAttribFormat.count == 2) {
+						cocos2d::log("its a me mario");
+					}
+					CCASSERT(vertexDataSize < _vboByteSlice, "commands vertex data is too big for slicing");
+					_lastVertexBufferSlicePos = _currentVertexBufferOffset;
+				}
+			}
+
 			bool currMaterial_skipBatching = currMaterial->_skipBatching || currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
 			bool needFlushDueToDifferentMatrix = false;
 
@@ -622,6 +651,8 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 					_currentVertexBatch->indexBufferOffset = _previousVertexBatch->indexBufferOffset;
 					_currentVertexBatch->vertexBufferOffset = _previousVertexBatch->vertexBufferOffset;
 				}
+				_previousVertexBatch->indexBufferOffsetEnd = _currentIndexBufferOffset;
+				_previousVertexBatch->vertexBufferOffsetEnd = _currentVertexBufferOffset;
 				newCommand = true;
 			}
 		}
@@ -756,9 +787,13 @@ void Renderer::initVertexGathering() {
 	_currentIndexBufferOffset = 0;
 	_currentVertexBufferOffset = 0;
 
+	_lastVertexBufferSlicePos = 0;
+
 	_currentAVCommandCount = 0;
 
 	_lastArbitraryCommand = nullptr;
+
+	_currentVBOIsWritten = false;
 
 	_lastAVC_was_NCT = false;
 
@@ -830,63 +865,62 @@ void Renderer::processRenderCommand(RenderCommand* command)
 		// TODO use FastVector
 		_batchedArbitaryCommands.push_back(command);
 	}
-	else
-		if (RenderCommand::Type::MESH_COMMAND == commandType)
+	else if (RenderCommand::Type::MESH_COMMAND == commandType)
+	{
+		flush2D();
+		auto cmd = static_cast<MeshCommand*>(command);
+
+		if (cmd->isSkipBatching() || _lastBatchedMeshCommand == nullptr || _lastBatchedMeshCommand->getMaterialID() != cmd->getMaterialID())
 		{
-			flush2D();
-			auto cmd = static_cast<MeshCommand*>(command);
+			flush3D();
 
-			if (cmd->isSkipBatching() || _lastBatchedMeshCommand == nullptr || _lastBatchedMeshCommand->getMaterialID() != cmd->getMaterialID())
+			if (cmd->isSkipBatching())
 			{
-				flush3D();
-
-				if (cmd->isSkipBatching())
-				{
-					// XXX: execute() will call bind() and unbind()
-					// but unbind() shouldn't be call if the next command is a MESH_COMMAND with Material.
-					// Once most of cocos2d-x moves to Pass/StateBlock, only bind() should be used.
-					cmd->execute();
-				}
-				else
-				{
-					cmd->preBatchDraw();
-					cmd->batchDraw();
-					_lastBatchedMeshCommand = cmd;
-				}
+				// XXX: execute() will call bind() and unbind()
+				// but unbind() shouldn't be call if the next command is a MESH_COMMAND with Material.
+				// Once most of cocos2d-x moves to Pass/StateBlock, only bind() should be used.
+				cmd->execute();
 			}
 			else
 			{
+				cmd->preBatchDraw();
 				cmd->batchDraw();
+				_lastBatchedMeshCommand = cmd;
 			}
-		}
-		else if (RenderCommand::Type::CUSTOM_COMMAND == commandType)
-		{
-			flush();
-			auto cmd = static_cast<CustomCommand*>(command);
-			cmd->execute();
-		}
-		else if (RenderCommand::Type::BATCH_COMMAND == commandType)
-		{
-			flush();
-			auto cmd = static_cast<BatchCommand*>(command);
-			cmd->execute();
-		}
-		else if (RenderCommand::Type::PRIMITIVE_COMMAND == commandType)
-		{
-			flush();
-			auto cmd = static_cast<PrimitiveCommand*>(command);
-			cmd->execute();
-		}
-		else if ((RenderCommand::Type)QueueCommand::QUEUE_COMMAND == commandType)
-		{
-			flush();
-			auto cmd = static_cast<QueueCommand*>(command);
-			(this->*cmd->func)();
 		}
 		else
 		{
-			CCLOGERROR("Unknown commands in renderQueue");
+			cmd->batchDraw();
 		}
+	}
+	else if (RenderCommand::Type::CUSTOM_COMMAND == commandType)
+	{
+		flush();
+		auto cmd = static_cast<CustomCommand*>(command);
+		cmd->execute();
+	}
+	else if (RenderCommand::Type::BATCH_COMMAND == commandType)
+	{
+		flush();
+		auto cmd = static_cast<BatchCommand*>(command);
+		cmd->execute();
+	}
+	else if (RenderCommand::Type::PRIMITIVE_COMMAND == commandType)
+	{
+		flush();
+		auto cmd = static_cast<PrimitiveCommand*>(command);
+		cmd->execute();
+	}
+	else if ((RenderCommand::Type)QueueCommand::QUEUE_COMMAND == commandType)
+	{
+		flush();
+		auto cmd = static_cast<QueueCommand*>(command);
+		(this->*cmd->func)();
+	}
+	else
+	{
+		CCLOGERROR("Unknown commands in renderQueue");
+	}
 }
 
 void Renderer::visitRenderQueue(RenderQueue& queue)
@@ -917,6 +951,8 @@ void Renderer::render()
 		initVertexGathering();
 		makeSingleRenderCommandList(_renderGroups[0]);
 		_vertexBatches->pointerAt(_currentVertexBatchIndex)->endRCIndex = _currentAVCommandCount;
+		_vertexBatches->pointerAt(_currentVertexBatchIndex)->indexBufferOffsetEnd = _currentIndexBufferOffset;
+		_vertexBatches->pointerAt(_currentVertexBatchIndex)->vertexBufferOffsetEnd = _currentVertexBufferOffset;
 		//3. map buffers
 		mapArbitraryBuffers();
 		//4. process render commands
@@ -1006,38 +1042,97 @@ void Renderer::drawBatchedQuads()
 }
 
 void Renderer::mapArbitraryBuffers() {
-	if (_currentVertexBufferOffset > 0)
-		glBindBuffer(GL_ARRAY_BUFFER, _aBuffersVBO[0]);
-	if (_currentIndexBufferOffset > 0)
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBuffersVBO[1]);
-
-	if (_useMapBuffer) {
+	if (!_isBufferSlicing) {
 		if (_currentVertexBufferOffset > 0) {
-			glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, nullptr, GL_STREAM_DRAW);
-			void* ptr = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
-			memcpy(ptr, _arbitraryVertexBuffer, _currentVertexBufferOffset);
-			glUnmapBuffer(GL_ARRAY_BUFFER);
-		}
+			glBindBuffer(GL_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[0]);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
 
-		if (_currentIndexBufferOffset > 0) {
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), nullptr, GL_STREAM_DRAW);
-			void* ptr = glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_WRITE_ONLY);
-			memcpy(ptr, _arbitraryIndexBuffer, _currentIndexBufferOffset * sizeof(short));
-			glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+			if (_useMapBuffer) {
+				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, nullptr, GL_DYNAMIC_DRAW);
+				void* ptr = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+				memcpy(ptr, _arbitraryVertexBuffer, _currentVertexBufferOffset);
+				glUnmapBuffer(GL_ARRAY_BUFFER);
+
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), nullptr, GL_DYNAMIC_DRAW);
+				ptr = glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_WRITE_ONLY);
+				memcpy(ptr, _arbitraryIndexBuffer, _currentIndexBufferOffset * sizeof(short));
+				glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+			}
+			else {
+				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, _arbitraryVertexBuffer, GL_DYNAMIC_DRAW);
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), _arbitraryIndexBuffer, GL_DYNAMIC_DRAW);
+			}
+
+			for (auto i = _vertexBatches->cbegin(); i < _vertexBatches->cend(); i++) {
+				VertexBatch* batch = const_cast<VertexBatch*>(i);
+				batch->vertexBufferHandle = _aBufferVBOs[_vboIndex].buffers[0];
+				batch->indexBufferHandle = _aBufferVBOs[_vboIndex].buffers[1];
+			}
 		}
 	}
 	else {
-		if (_currentVertexBufferOffset > 0)
-			glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, _arbitraryVertexBuffer, GL_STREAM_DRAW);
-		if (_currentIndexBufferOffset > 0)
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), _arbitraryIndexBuffer, GL_STREAM_DRAW);
+		if (_currentVertexBufferOffset > 0) {
+			// The following logic is used for buffer splitting. its pretty messy but gets the job done ;)
+
+			// Note that all offset with vertex in it are an offset in bytes
+			// Note that all offsets with index in it are an offset in shorts
+			// TODO maybe change the offset handling so indexOffset are in bytes
+
+			// TODO this part could need some name refactoring as the names doesnt really tell much about the usage of the var
+
+			ssize_t currentVertexBufferOffset = 0;
+			ssize_t currentIndexBufferOffset = 0;
+			ssize_t nextBufferOffset = _vboByteSlice;
+
+			ssize_t lastVertexEndOffset = 0;
+			ssize_t lastIndexEndOffset = 0;
+			ssize_t vertexSize = 0;
+			ssize_t indexSize = 0;
+
+			VertexBatch* batch = nullptr;
+
+			for (auto i = _vertexBatches->cbegin(); i < _vertexBatches->cend(); i++) {
+				batch = const_cast<VertexBatch*>(i);
+				ssize_t endOffset = batch->vertexBufferOffsetEnd;
+
+				if (endOffset - currentVertexBufferOffset > _vboByteSlice) {
+					glBindBuffer(GL_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[0]);
+					glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
+					glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_DYNAMIC_DRAW);
+					glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_DYNAMIC_DRAW);
+
+					currentVertexBufferOffset = batch->vertexBufferOffset;
+					currentIndexBufferOffset = batch->indexBufferOffset;
+
+					vertexSize = 0;
+					indexSize = 0;
+
+					nextVBO();
+				}
+				batch->indexBufferHandle = _aBufferVBOs[_vboIndex].buffers[1];
+				batch->vertexBufferHandle = _aBufferVBOs[_vboIndex].buffers[0];
+
+				vertexSize += endOffset - lastVertexEndOffset;
+				indexSize += batch->indexBufferOffsetEnd - lastIndexEndOffset;
+
+				lastIndexEndOffset = batch->indexBufferOffsetEnd;
+				lastVertexEndOffset = endOffset;
+
+				batch->vertexBufferOffset -= currentVertexBufferOffset;
+				batch->indexBufferOffset -= currentIndexBufferOffset;
+			}
+
+			// submit remaining data
+			glBindBuffer(GL_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[0]);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
+			glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_DYNAMIC_DRAW);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_DYNAMIC_DRAW);
+			nextVBO();
+		}
 	}
 }
 
 void Renderer::drawBatchedArbitaryVertices() {
-	glBindBuffer(GL_ARRAY_BUFFER, _aBuffersVBO[0]);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBuffersVBO[1]);
-
 	int endDrawnRenderCommands = _currentDrawnRenderCommands + _batchedArbitaryCommands.size();
 
 	int indexToDraw = 0;
@@ -1047,19 +1142,25 @@ void Renderer::drawBatchedArbitaryVertices() {
 
 	bool bindMaterial = true;
 	bool applyVertexAttribFormat = true;
+	bool bindBuffer = true;
 
 	auto avcPtr = _batchedArbitaryCommands.begin();
 
 	while (_currentDrawnRenderCommands < endDrawnRenderCommands) {
 		CCASSERT(_currentDrawnRenderCommands < _currentAVCommandCount, "Something went really wrong");
 		ArbitraryVertexCommand* avc = reinterpret_cast<ArbitraryVertexCommand*>(*avcPtr);
+		if (applyVertexAttribFormat) {
+			if (bindBuffer) {
+				glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBufferHandle);
+				glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch->indexBufferHandle);
+			}
+			batch->material->_vertexAttribFormat.apply((GLvoid*)batch->vertexBufferOffset);
+		}
 		if (bindMaterial) {
 			batch->material->apply(avc->_mv);
-			if (applyVertexAttribFormat) {
-				batch->material->_vertexAttribFormat.apply((GLvoid*)batch->vertexBufferOffset);
-			}
-			bindMaterial = applyVertexAttribFormat = false;
 		}
+
+		bindMaterial = applyVertexAttribFormat = bindBuffer = false;
 		indexToDraw += avc->_info.indexCount;
 		_currentDrawnRenderCommands++;
 		avcPtr++;
@@ -1083,6 +1184,11 @@ void Renderer::drawBatchedArbitaryVertices() {
 			if (newBatch->vertexBufferOffset != batch->vertexBufferOffset) {
 				// this means that the vertex attrib format must be changed
 				applyVertexAttribFormat = true;
+			}
+			if (newBatch->vertexBufferHandle != batch->vertexBufferHandle) {
+				// vbo changed means that the vertex attrib must be rebind
+				bindBuffer = applyVertexAttribFormat = true;
+				_startDrawIndex = 0;
 			}
 			batch = newBatch;
 			bindMaterial = true;
