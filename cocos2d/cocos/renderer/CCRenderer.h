@@ -136,11 +136,15 @@ struct VertexBatch {
 	int startingRCIndex; // index indicating at which position this attribs should be used
 	int endRCIndex; // index indicating at which position the next RenderCommandsVertexAttribInfo should be used
 	ssize_t vertexBufferOffset; // an offset into the vbo
-	ssize_t vertexBufferOffsetEnd;
+	ssize_t vertexBufferUsageStart;
+	ssize_t vertexBufferUsageEnd;
 	GLuint vertexBufferHandle;
 	ssize_t indexBufferOffset;
-	ssize_t indexBufferOffsetEnd;
+	ssize_t indexBufferUsageStart;
+	ssize_t indexBufferUsageEnd;
 	GLuint indexBufferHandle;
+
+	bool indexed;
 
 	Material2D* material;
 };
@@ -232,8 +236,6 @@ protected:
 	void setupVBOAndVAO();
 	void setupVBO();
 	void mapBuffers();
-	void drawBatchedTriangles();
-	void drawBatchedQuads();
 	void drawBatchedArbitaryVertices();
 
 	//Draw the previews queued quads and flush previous context
@@ -243,8 +245,6 @@ protected:
 
 	void flush3D();
 
-	void flushQuads();
-	void flushTriangles();
 	void flushArbitaryVertices();
 
 	void initVertexGathering();
@@ -278,9 +278,6 @@ protected:
 	FastPool<ArbitraryVertexCommand*>* _avcPool1;
 	FastPool<ArbitraryVertexCommand*>* _avcPool2;
 
-	FastPool<Material2D*>* _materialPool1;
-	FastPool<Material2D*>* _materialPool2;
-
 	FastPool<CustomCommand*>* _customCommandPool1;
 	FastPool<CustomCommand*>* _customCommandPool2;
 
@@ -300,30 +297,29 @@ protected:
 
 	int _currentVertexBatchIndex;
 
+	// vbo data
 	// this value is used for a loose round-robin approach, may not be less than 1
 	float _vboCountMultiplier;
-	ssize_t _vboVertexResetThreshold;
 	ssize_t _vboByteSlice;
 	unsigned int _vboCount;
 
+	// buffer data info
 	byte* _currentVertexBuffer;
 	GLushort* _currentIndexBuffer;
 	ssize_t _currentVertexBufferOffset;
 	ssize_t _currentIndexBufferOffset;
 
-	bool _previousQuadOrTriangleCommand;
-	uint32_t _currentQOrTMaterialId;
-	Material2D* _currentQTMaterial;
-	uint32_t _currentMaterial2dId;
+	// batching info
 	bool _lastMaterial_skipBatching = false;
+	bool _lastCommandWasIndexed;
 	bool _lastWasFlushCommand;
 	bool _firstAVC = false;
-
-	int _usedBatchesCount;
+	uint32_t _currentMaterial2dId;
 
 	bool _lastAVC_was_NCT; // short version for : last ArbitaryVertexCommand was Non Cpu Transform
 	Mat4 _lastAVC_NCT_Matrix;
 
+	// map buffer
 	bool _useMapBuffer;
 
 	/* clear color set outside be used in setGLDefaultValues() */

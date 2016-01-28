@@ -50,8 +50,6 @@ public:
     {
         /** Reserved type.*/
         UNKNOWN_COMMAND,
-        /** Quad command, used for draw quad.*/
-        QUAD_COMMAND,
         /**Custom command, used for calling callback for rendering.*/
         CUSTOM_COMMAND,
         /**Batch command, used for draw batches in texture atlas.*/
@@ -62,8 +60,6 @@ public:
         MESH_COMMAND,
         /**Primitive command, used to draw primitives such as lines, points and triangles.*/
         PRIMITIVE_COMMAND,
-        /**Triangles command, used to draw triangles.*/
-        TRIANGLES_COMMAND,
 		/**Arbitary Vertex command, used for drawing arbitary vertex data*/
 		ARBITRARY_VERTEX_COMMAND
     };

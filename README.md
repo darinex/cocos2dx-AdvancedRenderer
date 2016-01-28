@@ -11,6 +11,9 @@ Features are:
 * even ArbitraryVertexCommands with non-cpu-transformation who share the same model view matrix, are batched
 * completely compatible with TrianglesCommand and QuadCommand (they are automatically converted to ArbitraryVertexCommands)
 * all vertices are gathered before drawing so that the vertex and index vbos are only updated once per Renderer::render() call, which improves performance in some situations
+* performance on mobile plattform is significantly better with the cocos2dx-AdvancedRenderer, if you use vertex data bigger than ~100kb
+
+**Note**: Batching only works for TRIANGLES, LINES and POINTS. If you use other formats, enable skipBatching for your Material2D. If you don't do it, results may be not what you're expecting.
 
 #### Works under:
 * Android (tested)
@@ -20,8 +23,6 @@ Features are:
 * Win10 (not tested)
 * Linux (not tested)
 
-**NOTE:** If you are using lots of TrianglesCommands (e.g. Sprites) the perfromance of you're game can significantly decrease.
-
 ## Usage
 
 To use an ArbitraryVertexCommand you first have to create a Material2D:
@@ -29,7 +30,7 @@ To use an ArbitraryVertexCommand you first have to create a Material2D:
 ```
 Texture2D* texture = ...;
 GLProgramState* state = ....;
-VertexAttribInfoFormat format = ...;
+VertexStreamAttributes format = ...;
 Material2D* material = new Material2D();
 material->init(state, &texture, 1, BlendFunc::ADDITIVE, format, MaterialPrimitiveType::TRIANGLE); 
 ```
@@ -37,12 +38,13 @@ material->init(state, &texture, 1, BlendFunc::ADDITIVE, format, MaterialPrimitiv
 VertexAttribInfoFormats are created like this:
 
 ```
-VertexAttribInfoFormat format;
+VertexStreamAttributes format;
 format.count = 2;
-format.infos = new VertexAttribInfo[format.count];
-format.infos[0] = {attrib_location_in_shader, element_count, element_type, normalized, vertex_stride, offset_of_vertex_attrib_in_vertex_data_in_bytes};
+format.stride = size_of_vertex_in_bytes;
+format.infos = new VertexStreamAttribute[format.count];
+format.infos[0] = VertexStreamAttribute(offset_of_vertex_attrib_in_vertex_data_in_bytes, attrib_location_in_shader, element_type, element_count, normalized);
 ...
-// Example:  format.infos[0] = {0, 3, GL_FLOAT, GL_FALSE, 24, 0}
+// Example:  format.infos[0] = VertexStreamAttribute(0, 0, GL_FLOAT, 3, false);
 ```
 
 Finally, create the ArbitraryVertexCommand and add it to the renderer:
@@ -53,9 +55,9 @@ command->init(global_z_order, material, draw_data, model_view_matrix, transform_
 /*
 Example:
 ArbitraryVertexCommand::Data data;
+// if index_count is 0, non-indexed drawing will be used
 data.indexCount = index_count;
 data.indexData = index_data;
-data.sizeOfVertex = size_of_one_vertex;
 data.vertexCount = vertex_count;
 data.vertexData = vertex_data_as_byte_ptr;
 command->init(0, material, data, Mat4::IDENTITY, true);

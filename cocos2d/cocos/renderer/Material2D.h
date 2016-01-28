@@ -4,6 +4,7 @@
 #include "platform\CCGL.h"
 
 #include "renderer\CCGLProgramState.h"
+#include "renderer\CCVertexIndexData.h"
 
 #define MAX_TEXTURES_PER_MATERIAL2D 4
 
@@ -21,26 +22,20 @@ enum class MaterialPrimitiveType {
 	LINE_STRIP = GL_LINE_STRIP,
 };
 
-struct VertexAttribInfo {
-	GLuint index;
-	GLuint size;
-	GLenum type;
-	GLboolean normalized;
-	GLuint stride;
-	GLuint offset;
-};
-
-struct CC_DLL VertexAttribInfoFormat {
-	VertexAttribInfo* infos;
-	unsigned int count;
+struct CC_DLL VertexStreamAttributes {
+	VertexStreamAttribute* infos;
+	uint32_t count;
 	uint32_t id;
+	GLuint stride;
 
-	VertexAttribInfoFormat();
-	~VertexAttribInfoFormat();
+	VertexStreamAttributes();
+	~VertexStreamAttributes();
 
 	void generateID();
 	void apply(void* bufferOffset);
 };
+
+typedef VertexStreamAttributes VertexAttribInfoFormat;
 
 // The name is not really accurate as this material class is not really a material and it can be used for non 2d objects too. I just needed a name :)
 class CC_DLL Material2D {
@@ -51,9 +46,9 @@ public:
 	// @vertexStride - is the size in bytes of one vertex. use -1 as value
 	// @textures - an array of Texture2D*
 	// @texturesCount - the number of elements in textures
-	void init(GLProgramState* program, Texture2D** textures, int texturesCount, BlendFunc blendFunc, VertexAttribInfoFormat format, MaterialPrimitiveType primitiveType, GLint vertexStride = -1);
+	void init(GLProgramState* program, Texture2D** textures, int texturesCount, BlendFunc blendFunc, VertexAttribInfoFormat format, MaterialPrimitiveType primitiveType);
 
-	void init(GLProgramState* program, GLuint* textures, int texturesCount, BlendFunc blendFunc, VertexAttribInfoFormat format, MaterialPrimitiveType primitiveType, GLint vertexStride = -1);
+	void init(GLProgramState* program, GLuint* textures, int texturesCount, BlendFunc blendFunc, VertexAttribInfoFormat format, MaterialPrimitiveType primitiveType);
 
 	void apply(const Mat4& modelView);
 
@@ -62,10 +57,12 @@ public:
 	}
 
 	inline int getVertexAttribInfoFormat() {
-		return _vertexAttribFormat.id;
+		return _vertexStreamAttributes.id;
 	}
 
-	inline int getVertexStride() const { return _vertexStride; }
+	CC_DEPRECATED() inline int getVertexStride() const { return getVertexSize(); }
+
+	inline int getVertexSize() const { return _vertexStreamAttributes.stride; }
 
 	inline GLProgramState* getProgramState() const { return _glProgramState; }
 
@@ -79,9 +76,8 @@ protected:
 	GLProgramState* _glProgramState;
 	GLuint _textureNames[MAX_TEXTURES_PER_MATERIAL2D];
 	BlendFunc _blendFunc;
-	VertexAttribInfoFormat _vertexAttribFormat;
+	VertexAttribInfoFormat _vertexStreamAttributes;
 	MaterialPrimitiveType _primitiveType;
-	GLint _vertexStride;
 	bool _skipBatching;
 	int _textureCount;
 };

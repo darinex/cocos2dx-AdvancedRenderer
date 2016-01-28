@@ -82,9 +82,6 @@ static CustomCommand* newCustomCommand() {
 static ArbitraryVertexCommand* newArbitraryVertexCommand() {
 	return new ArbitraryVertexCommand();
 }
-static Material2D* newMaterial2D() {
-	return new Material2D();
-}
 
 // queue
 RenderQueue::RenderQueue()
@@ -249,7 +246,7 @@ Renderer::Renderer()
 #if (CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 && CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 && CC_TARGET_PLATFORM != CC_PLATFORM_WIN32)
 	_isBufferSlicing = true;
 #else
-	_isBufferSlicing = false;
+	_isBufferSlicing = true;
 #endif
 
 	_renderCommands = new FastVector<RenderCommand*>();
@@ -258,9 +255,6 @@ Renderer::Renderer()
 	// init all pools
 	_avcPool1 = new FastPool<ArbitraryVertexCommand*>(&newArbitraryVertexCommand);
 	_avcPool2 = new FastPool<ArbitraryVertexCommand*>(&newArbitraryVertexCommand);
-
-	_materialPool1 = new FastPool<Material2D*>(&newMaterial2D);
-	_materialPool2 = new FastPool<Material2D*>(&newMaterial2D);
 
 	_customCommandPool1 = new FastPool<CustomCommand*>(&newCustomCommand);
 	_customCommandPool2 = new FastPool<CustomCommand*>(&newCustomCommand);
@@ -278,23 +272,20 @@ Renderer::Renderer()
 	_vboIndex = 0;
 
 	// create vertex layouts
-	VertexAttribInfo* tc_vail_infos = new VertexAttribInfo[3];
-	tc_vail_infos[0] = { GLProgram::VERTEX_ATTRIB_POSITION, 3, GL_FLOAT, false, sizeof(V3F_C4B_T2F), offsetof(V3F_C4B_T2F, vertices) };
-	tc_vail_infos[1] = { GLProgram::VERTEX_ATTRIB_COLOR, 4, GL_UNSIGNED_BYTE, true, sizeof(V3F_C4B_T2F), offsetof(V3F_C4B_T2F, colors) };
-	tc_vail_infos[2] = { GLProgram::VERTEX_ATTRIB_TEX_COORD, 2, GL_FLOAT, false, sizeof(V3F_C4B_T2F), offsetof(V3F_C4B_T2F, texCoords) };
-
-	_triangleCommandVAIL.infos = tc_vail_infos;
-	_triangleCommandVAIL.count = 3;
-	_triangleCommandVAIL.generateID();
 
 	// init all vbo related stuff
 	// TODO read the following values from a file
 	_vboByteSlice = 100000;
 	_vboCountMultiplier = 1.3f;
-	_vboVertexResetThreshold = 20000;
 
 	// this data is renderer computed
-	_vboCount = (int)ceilf(ARBITRARY_VBO_SIZE / (float)_vboByteSlice);
+
+	if (_isBufferSlicing) {
+		_vboCount = (int)ceilf(ARBITRARY_VBO_SIZE / (float)_vboByteSlice);
+	}
+	else {
+		_vboCount = 10;
+	}
 
 	_aBufferVBOs = new VertexIndexBO[_vboCount];
 }
@@ -307,12 +298,9 @@ Renderer::~Renderer()
 	delete _renderCommands;
 	delete _vertexBatches;
 
-	// init all pools
+	// delete all pools
 	delete _avcPool1;
 	delete _avcPool2;
-
-	delete _materialPool1;
-	delete _materialPool2;
 
 	delete _customCommandPool1;
 	delete _customCommandPool2;
@@ -353,11 +341,14 @@ void Renderer::initGLView()
 		_quadIndices[i * 6 + 5] = (GLushort)(i * 4 + 1);
 	}
 
+	QuadCommand::setStaticIndices(_quadIndices);
+
 	setupBuffer();
 
 #if (CC_TARGET_PLATFORM == CC_PLATFORM_WIN32 || CC_TARGET_PLATFORM != CC_PLATFORM_WIN32 || CC_TARGET_PLATFORM != CC_PLATFORM_WIN32)
 	// only use glMapBuffer on desktop platforms as it is used with buffer orphaning, and buffer orphaning could be slow with really big data on mobile devices
 	_useMapBuffer = Configuration::getInstance()->checkForGLExtension("map_buffer");
+	_useMapBuffer = false;
 #endif
 
 	_glViewAssigned = true;
@@ -428,10 +419,15 @@ int Renderer::createRenderQueue()
 }
 
 void Renderer::nextVertexBatch() {
-	_previousVertexBatch = _vertexBatches->pointerAt(_currentVertexBatchIndex);
+	if (_vertexBatches->at(_currentVertexBatchIndex).endRCIndex == 0) {
+		// vertex batch not used yet -> return
+		return;
+	}
 	_vertexBatches->push_back_resize(VertexBatch());
+	_previousVertexBatch = _vertexBatches->pointerAt(_currentVertexBatchIndex);
 	_currentVertexBatchIndex++;
 	_currentVertexBatch = _vertexBatches->pointerAt(_currentVertexBatchIndex);
+	_currentVertexBatch->endRCIndex = 0;
 }
 
 inline bool matrixEqual(Mat4* mat1, Mat4* mat2) {
@@ -453,104 +449,176 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 
 	for (auto i = commands.cbegin(); i < commands.cend(); i++, j++) {
 		auto type = (*i)->getType();
-		bool newQTMaterial = false;
-		bool newCommand = _lastWasFlushCommand;
-
-		// avc data
-		bool transformOnCpu = false;
-		ArbitraryVertexCommand::Data data;
-		ArbitraryVertexCommand::DrawInfo drawInfo;
-		Mat4 modelView;
-
-		int vertexDataSize = 0;
-
-		Material2D* currMaterial = nullptr;
 
 		if (type == RenderCommand::Type::ARBITRARY_VERTEX_COMMAND) {
 			ArbitraryVertexCommand* avc = (ArbitraryVertexCommand*)(*i);
-			currMaterial = avc->_material2d;
-			transformOnCpu = avc->_transformOnCpu;
-			data = avc->_data;
-			modelView = avc->_mv;
-			drawInfo = avc->_info;
-			vertexDataSize = avc->getVertexDataSize();
-			_previousQuadOrTriangleCommand = false;
-		}
-		else if (type == RenderCommand::Type::TRIANGLES_COMMAND) {
-			TrianglesCommand* cmd = (TrianglesCommand*)(*i);
-			if (_previousQuadOrTriangleCommand) {
-				int matId = cmd->getMaterialID();
-				if (_currentQOrTMaterialId != matId) {
-					newQTMaterial = true;
-					_currentQOrTMaterialId = matId;
+
+			bool newCommand = _lastWasFlushCommand;
+
+			Material2D* currMaterial = avc->_material2d;
+			bool transformOnCpu = avc->_transformOnCpu;
+			ArbitraryVertexCommand::Data data = avc->_data;
+			Mat4 modelView = avc->_mv;
+			ssize_t vertexDataSize = avc->getVertexDataSize();
+
+			_lastWasFlushCommand = false;
+
+			// process batching
+
+			// check if buffer limit is exceeded
+			if (_currentVertexBufferOffset + vertexDataSize > ARBITRARY_VBO_SIZE ||
+				_currentIndexBufferOffset + data.indexCount > ARBITRARY_INDEX_VBO_SIZE) {
+				CCASSERT(false, "Exceeding the index or vertex buffer size");
+			}
+
+			if (_firstAVC) {
+				_vertexBatches->push_back_resize(VertexBatch());
+				_currentVertexBatch->material = currMaterial;
+				_currentVertexBatch->indexed = avc->_isIndexed;
+				_lastMaterial_skipBatching = currMaterial->_skipBatching && currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
+				newCommand = true;
+				_firstAVC = false;
+			}
+			else {
+
+				bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF; // meaning no index(short) could adress it anymore
+
+				if (_isBufferSlicing) {
+					bool vboFull = ((_currentVertexBufferOffset + vertexDataSize) - _lastVertexBufferSlicePos) > _vboByteSlice;
+					needsFilledVertexReset |= vboFull;
+
+					if (vboFull) {
+						CCASSERT(vertexDataSize < _vboByteSlice, "commands vertex data is too big for slicing");
+						_lastVertexBufferSlicePos = _currentVertexBufferOffset;
+					}
+				}
+
+				bool currMaterial_skipBatching = currMaterial->_skipBatching || currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
+				bool needFlushDueToDifferentMatrix = false;
+
+				bool indexedStateDiffers = avc->_isIndexed != _lastCommandWasIndexed;
+
+				needsFilledVertexReset |= indexedStateDiffers;
+
+				// check if there need to be new batch due to different transform mode:
+				// last command was cpu-transform and new one isnt -> new batch
+				// last command was non-cpu-transform and new one is -> new batch
+				// last command and new command are cpu-transformed, but dont share the same modelview -> new batch
+				if (_lastAVC_was_NCT) {
+					do {
+						if (transformOnCpu) {
+							needFlushDueToDifferentMatrix = true;
+							break;
+						}
+						if (!matrixEqual(&_lastAVC_NCT_Matrix, &modelView)) {
+							needFlushDueToDifferentMatrix = true;
+							_lastAVC_NCT_Matrix = modelView;
+						}
+					} while (0);
+				}
+				else if (!transformOnCpu) {
+					needFlushDueToDifferentMatrix = true;
+					_lastAVC_NCT_Matrix = modelView;
+				}
+
+				// check if:
+				// curr material id differs from previous?
+				// either curr or prev materials skipped batching?
+				// there needs to be a _filledVertex reset
+				// the above check returned new batch
+				if (currMaterial->_id != _currentMaterial2dId ||
+					currMaterial_skipBatching ||
+					_lastMaterial_skipBatching ||
+					needsFilledVertexReset ||
+					needFlushDueToDifferentMatrix)
+				{
+					// set the previous vertex batch end render command index
+					_currentVertexBatch->endRCIndex = _currentAVCommandCount;
+					// go to next vertex batch
+					nextVertexBatch();
+					// set material and starting render command index
+					_currentVertexBatch->material = currMaterial;
+					_currentVertexBatch->indexed = avc->_isIndexed;
+					_currentVertexBatch->indexBufferHandle = 0;
+					_currentVertexBatch->vertexBufferHandle = 0;
+					_currentVertexBatch->startingRCIndex = _currentAVCommandCount;
+					if (needsFilledVertexReset || _lastArbitraryCommand->_material2d->_vertexStreamAttributes.id != currMaterial->_vertexStreamAttributes.id) {
+						// if needsFilledVertexReset is set or the vertex attrib format from the previous material is different from the current use new vertex offset
+						_filledVertex = 0;
+						_currentVertexBatch->indexBufferOffset = _currentIndexBufferOffset;
+						_currentVertexBatch->vertexBufferOffset = _currentVertexBufferOffset;
+					}
+					else {
+						// use the offsets from the previous one
+						_currentVertexBatch->indexBufferOffset = _previousVertexBatch->indexBufferOffset;
+						_currentVertexBatch->vertexBufferOffset = _previousVertexBatch->vertexBufferOffset;
+					}
+					_previousVertexBatch->indexBufferUsageEnd = _currentVertexBatch->indexBufferUsageStart = _currentIndexBufferOffset;
+					_previousVertexBatch->vertexBufferUsageEnd = _currentVertexBatch->vertexBufferUsageStart = _currentVertexBufferOffset;
+					newCommand = true;
 				}
 			}
-			else {
-				newQTMaterial = true;
-				_previousQuadOrTriangleCommand = true;
-				_currentQOrTMaterialId = cmd->getMaterialID();
-			}
-			if (newQTMaterial) {
-				Material2D* material = _materialPool1->pop();
-				GLuint texId = cmd->getTextureID();
-				material->init(cmd->getGLProgramState(), &texId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
-				_materialPool2->push(material);
-				currMaterial = _currentQTMaterial = material;
-			}
-			else {
-				currMaterial = _currentQTMaterial;
-			}
+			_lastAVC_was_NCT = !transformOnCpu;
+			_lastCommandWasIndexed = avc->_isIndexed;
+			_currentMaterial2dId = currMaterial->_id;
 
-			data.indexCount = drawInfo.indexCount = cmd->getIndexCount();
-			data.indexData = (unsigned short*)cmd->getIndices();
-			data.sizeOfVertex = sizeof(V3F_C4B_T2F);
-			data.vertexData = (byte*)cmd->getVertices();
-			data.vertexCount = drawInfo.vertexCount = cmd->getVertexCount();
-			vertexDataSize = data.sizeOfVertex * data.vertexCount;
-			modelView = cmd->getModelView();
-
-			transformOnCpu = true;
-		}
-		else if (type == RenderCommand::Type::QUAD_COMMAND) {
-			QuadCommand* cmd = (QuadCommand*)(*i);
-			// if the previous command was a quad or triangle command, check if they had the same material id.
-			// If yes that means that there is no need to create a new material, just reuse the last one.
-			if (_previousQuadOrTriangleCommand) {
-				int matId = cmd->getMaterialID();
-				if (_currentQOrTMaterialId != matId) {
-					newQTMaterial = true;
-					_currentQOrTMaterialId = matId;
+			// data copying logic
+			memcpy(_currentVertexBuffer, data.vertexData, vertexDataSize);
+			if (transformOnCpu) {
+				// treat the first 12 byte (3 floats) as a Vec3 and transform it using the modelView
+				byte* ptr = _currentVertexBuffer;
+				byte* endPtr = ptr + vertexDataSize;
+				int stride = currMaterial->_vertexStreamAttributes.stride;
+				while (ptr < endPtr) {
+					Vec3* vec = reinterpret_cast<Vec3*>(ptr);
+					modelView.transformPoint(vec);
+					ptr += stride;
 				}
 			}
-			else {
-				newQTMaterial = true;
-				_previousQuadOrTriangleCommand = true;
-				_currentQOrTMaterialId = cmd->getMaterialID();
-			}
-			if (newQTMaterial) {
-				Material2D* material = _materialPool1->pop();
-				GLuint texId = cmd->getTextureID();
-				material->init(cmd->getGLProgramState(), &texId, 1, cmd->getBlendType(), _triangleCommandVAIL, MaterialPrimitiveType::TRIANGLE);
-				_materialPool2->push(material);
-				currMaterial = _currentQTMaterial = material;
-			}
-			else {
-				// if the quad or triangle command material does not differ from the previous, reuse the previous one
-				currMaterial = _currentQTMaterial;
-			}
-			int quadCount = cmd->getQuadCount();
-			int indexCount = quadCount * 6;
-			CCASSERT(indexCount <= INDEX_VBO_SIZE, "QuadCommand too big");
+			if (data.indexCount != 0) {
+				// copy index data
+				if (_filledVertex == 0) {
+					// special case when the vertex buffer offset is 0
+					memcpy(_currentIndexBuffer, data.indexData, sizeof(short) * data.indexCount);
+				}
+				else {
+					GLushort* ptr = _currentIndexBuffer;
+					GLushort* endPtr = ptr + data.indexCount;
 
-			data.indexCount = drawInfo.indexCount = indexCount;
-			data.indexData = (unsigned short*)_quadIndices;
-			data.sizeOfVertex = sizeof(V3F_C4B_T2F);
-			data.vertexData = (byte*)cmd->getQuads();
-			data.vertexCount = drawInfo.vertexCount = quadCount * 4;
-			vertexDataSize = data.sizeOfVertex * data.vertexCount;
-			modelView = cmd->getModelView();
+					GLushort* srcPtr = (GLushort*)data.indexData;
 
-			transformOnCpu = true;
+					while (ptr < endPtr) {
+						*(ptr++) = *(srcPtr++) + _filledVertex;
+					}
+				}
+			}
+
+			// adjust buffers and offset
+			_currentIndexBuffer += data.indexCount;
+			_currentVertexBuffer += vertexDataSize;
+
+			_currentVertexBufferOffset += vertexDataSize;
+			_currentIndexBufferOffset += data.indexCount;
+
+			_filledVertex += data.vertexCount;
+
+			// if newCommand is set create a new avc and init it
+			if (newCommand) {
+				ArbitraryVertexCommand* avc = _avcPool1->pop();
+
+				// the data value doesnt really matters here
+				avc->init(0, currMaterial, data, modelView, transformOnCpu, 0);
+
+				_currentAVCommandCount++;
+				_lastArbitraryCommand = avc;
+				_renderCommands->push_back_resize(avc);
+
+				_avcPool2->push(avc);
+			}
+			else {
+				// do nothing
+			}
+			_lastArbitraryCommand = avc;
 		}
 		else {
 			_lastWasFlushCommand = true;
@@ -561,158 +629,6 @@ void Renderer::makeSingleRenderCommandList(std::vector<RenderCommand*> commands)
 			}
 			_renderCommands->push_back_resize(*i);
 			continue;
-		}
-		_lastWasFlushCommand = false;
-
-		// process batching
-
-		// check if buffer limit is exceeded
-		if (_currentVertexBufferOffset + vertexDataSize > ARBITRARY_VBO_SIZE ||
-			_currentIndexBufferOffset + data.indexCount > ARBITRARY_INDEX_VBO_SIZE) {
-			CCASSERT(false, "Exceeding the index or vertex buffer size");
-		}
-
-		if (_firstAVC) {
-			_currentVertexBatch->material = currMaterial;
-			_currentVertexBatch->endRCIndex = 0;
-			_currentVertexBatch->indexBufferOffset = 0;
-			_currentVertexBatch->startingRCIndex = 0;
-			_currentVertexBatch->vertexBufferOffset = 0;
-			_lastMaterial_skipBatching = currMaterial->_skipBatching && currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
-			newCommand = true;
-			_firstAVC = false;
-		}
-		else {
-
-			bool needsFilledVertexReset = _filledVertex + data.vertexCount > 0xFFFF; // meaning no index(short) could adress it anymore
-
-			if (_isBufferSlicing) {
-				bool vboFull = ((_currentVertexBufferOffset + vertexDataSize) - _lastVertexBufferSlicePos) > _vboByteSlice;
-				needsFilledVertexReset |= vboFull;
-
-				if (vboFull) {
-					if (currMaterial->_vertexAttribFormat.count == 2) {
-						cocos2d::log("its a me mario");
-					}
-					CCASSERT(vertexDataSize < _vboByteSlice, "commands vertex data is too big for slicing");
-					_lastVertexBufferSlicePos = _currentVertexBufferOffset;
-				}
-			}
-
-			bool currMaterial_skipBatching = currMaterial->_skipBatching || currMaterial->_id == MATERIAL_ID_DO_NOT_BATCH;
-			bool needFlushDueToDifferentMatrix = false;
-
-			// check if there need to be new batch due to different transform mode:
-			// last command was cpu-transform and new one isnt -> new batch
-			// last command was non-cpu-transform and new one is -> new batch
-			// last command and new command are cpu-transformed, but dont share the same modelview -> new batch
-			if (_lastAVC_was_NCT) {
-				do {
-					if (transformOnCpu) {
-						needFlushDueToDifferentMatrix = true;
-						break;
-					}
-					if (!matrixEqual(&_lastAVC_NCT_Matrix, &modelView)) {
-						needFlushDueToDifferentMatrix = true;
-						_lastAVC_NCT_Matrix = modelView;
-					}
-				} while (0);
-			}
-			else if (!transformOnCpu) {
-				needFlushDueToDifferentMatrix = true;
-				_lastAVC_NCT_Matrix = modelView;
-			}
-
-			// check if:
-			// curr material id differs from previous?
-			// either curr or prev materials skipped batching?
-			// there needs to be a _filledVertex reset
-			// the above check returned new batch
-			if (currMaterial->_id != _currentMaterial2dId ||
-				currMaterial_skipBatching ||
-				_lastMaterial_skipBatching ||
-				needsFilledVertexReset ||
-				needFlushDueToDifferentMatrix) {
-				// go to next vertex batch
-				nextVertexBatch();
-				// set the previous vertex batch end render command index
-				_previousVertexBatch->endRCIndex = _currentAVCommandCount;
-				// set material and starting render command index
-				_currentVertexBatch->material = currMaterial;
-				_currentVertexBatch->startingRCIndex = _currentAVCommandCount;
-				if (needsFilledVertexReset || _lastArbitraryCommand->_material2d->_vertexAttribFormat.id != currMaterial->_vertexAttribFormat.id) {
-					// if needsFilledVertexReset is set or the vertex attrib format from the previous material is different from the current use new vertex offset
-					_filledVertex = 0;
-					_currentVertexBatch->indexBufferOffset = _currentIndexBufferOffset;
-					_currentVertexBatch->vertexBufferOffset = _currentVertexBufferOffset;
-				}
-				else {
-					// use the offsets from the previous one
-					_currentVertexBatch->indexBufferOffset = _previousVertexBatch->indexBufferOffset;
-					_currentVertexBatch->vertexBufferOffset = _previousVertexBatch->vertexBufferOffset;
-				}
-				_previousVertexBatch->indexBufferOffsetEnd = _currentIndexBufferOffset;
-				_previousVertexBatch->vertexBufferOffsetEnd = _currentVertexBufferOffset;
-				newCommand = true;
-			}
-		}
-		_lastAVC_was_NCT = !transformOnCpu;
-		_currentMaterial2dId = currMaterial->_id;
-
-		memcpy(_currentVertexBuffer, data.vertexData, vertexDataSize);
-		if (transformOnCpu) {
-			// treat the first 12 byte (3 floats) as a Vec3 and transform it using the modelView
-			byte* ptr = _currentVertexBuffer;
-			byte* endPtr = ptr + vertexDataSize;
-			int stride = currMaterial->_vertexStride;
-			while (ptr < endPtr) {
-				Vec3* vec = reinterpret_cast<Vec3*>(ptr);
-				modelView.transformPoint(vec);
-				ptr += stride;
-			}
-		}
-		// copy index data
-		if (_filledVertex == 0) {
-			// special case when the vertex buffer offset is 0
-			memcpy(_currentIndexBuffer, data.indexData, sizeof(short) * data.indexCount);
-		}
-		else {
-			GLushort* ptr = _currentIndexBuffer;
-			GLushort* endPtr = ptr + data.indexCount;
-
-			GLushort* srcPtr = (GLushort*)data.indexData;
-
-			while (ptr < endPtr) {
-				*(ptr++) = *(srcPtr++) + _filledVertex;
-			}
-		}
-
-		// adjust buffers and offset
-		_currentIndexBuffer += data.indexCount;
-		_currentVertexBuffer += vertexDataSize;
-
-		_currentVertexBufferOffset += vertexDataSize;
-		_currentIndexBufferOffset += data.indexCount;
-
-		_filledVertex += data.vertexCount;
-
-		// if newCommand is set create a new avc and init it
-		if (newCommand) {
-			ArbitraryVertexCommand* avc = _avcPool1->pop();
-
-			// the data value doesnt really matters here
-			avc->init(0, currMaterial, data, modelView, transformOnCpu, drawInfo, 0);
-
-			_currentAVCommandCount++;
-			_lastArbitraryCommand = avc;
-			_renderCommands->push_back_resize(avc);
-
-			_avcPool2->push(avc);
-		}
-		else {
-			// if not, just add the data to the previous one
-			_lastArbitraryCommand->_info.indexCount += drawInfo.indexCount;
-			_lastArbitraryCommand->_info.vertexCount += drawInfo.vertexCount;
 		}
 	}
 }
@@ -769,18 +685,20 @@ void Renderer::makeSingleRenderCommandList(RenderQueue& queue) {
 					b = n
 
 void Renderer::initVertexGathering() {
-	_currentVertexBatchIndex = -1;
-	nextVertexBatch();
+	_currentVertexBatchIndex = 0;
 
-	_previousQuadOrTriangleCommand = false;
-	_currentQOrTMaterialId = 0;
 	_currentMaterial2dId = 0;
 	_lastMaterial_skipBatching = false;
 	_firstAVC = true;
 	_lastWasFlushCommand = false;
+	_lastCommandWasIndexed = false;
 
 	_filledVertex = 0;
 	_filledIndex = 0;
+
+	memset(_vertexBatches->pointerAt(0), 0, sizeof(VertexBatch));
+	_previousVertexBatch = _vertexBatches->pointerAt(0);
+	_currentVertexBatch = _previousVertexBatch;
 
 	_currentIndexBuffer = _arbitraryIndexBuffer;
 	_currentVertexBuffer = _arbitraryVertexBuffer;
@@ -800,9 +718,6 @@ void Renderer::initVertexGathering() {
 	// swap the pools
 	if (_customCommandPool1->getElementCount() < _customCommandPool2->getElementCount()) {
 		SWAP(_customCommandPool1, _customCommandPool2, FastPool<CustomCommand*>*, temp1);
-	}
-	if (_materialPool1->getElementCount() < _materialPool2->getElementCount()) {
-		SWAP(_materialPool1, _materialPool2, FastPool<Material2D*>*, temp2);
 	}
 	if (_avcPool1->getElementCount() < _avcPool2->getElementCount()) {
 		SWAP(_avcPool1, _avcPool2, FastPool<ArbitraryVertexCommand*>*, temp3);
@@ -951,8 +866,8 @@ void Renderer::render()
 		initVertexGathering();
 		makeSingleRenderCommandList(_renderGroups[0]);
 		_vertexBatches->pointerAt(_currentVertexBatchIndex)->endRCIndex = _currentAVCommandCount;
-		_vertexBatches->pointerAt(_currentVertexBatchIndex)->indexBufferOffsetEnd = _currentIndexBufferOffset;
-		_vertexBatches->pointerAt(_currentVertexBatchIndex)->vertexBufferOffsetEnd = _currentVertexBufferOffset;
+		_vertexBatches->pointerAt(_currentVertexBatchIndex)->indexBufferUsageEnd = _currentIndexBufferOffset;
+		_vertexBatches->pointerAt(_currentVertexBatchIndex)->vertexBufferUsageEnd = _currentVertexBufferOffset;
 		//3. map buffers
 		mapArbitraryBuffers();
 		//4. process render commands
@@ -1033,14 +948,6 @@ void Renderer::fillQuads(const QuadCommand *cmd)
 {
 }
 
-void Renderer::drawBatchedTriangles()
-{
-}
-
-void Renderer::drawBatchedQuads()
-{
-}
-
 void Renderer::mapArbitraryBuffers() {
 	if (!_isBufferSlicing) {
 		if (_currentVertexBufferOffset > 0) {
@@ -1048,19 +955,19 @@ void Renderer::mapArbitraryBuffers() {
 			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
 
 			if (_useMapBuffer) {
-				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, nullptr, GL_DYNAMIC_DRAW);
+				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, nullptr, GL_STREAM_DRAW);
 				void* ptr = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
 				memcpy(ptr, _arbitraryVertexBuffer, _currentVertexBufferOffset);
 				glUnmapBuffer(GL_ARRAY_BUFFER);
 
-				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), nullptr, GL_DYNAMIC_DRAW);
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), nullptr, GL_STREAM_DRAW);
 				ptr = glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_WRITE_ONLY);
 				memcpy(ptr, _arbitraryIndexBuffer, _currentIndexBufferOffset * sizeof(short));
 				glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
 			}
 			else {
-				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, _arbitraryVertexBuffer, GL_DYNAMIC_DRAW);
-				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), _arbitraryIndexBuffer, GL_DYNAMIC_DRAW);
+				glBufferData(GL_ARRAY_BUFFER, _currentVertexBufferOffset, _arbitraryVertexBuffer, GL_STREAM_DRAW);
+				glBufferData(GL_ELEMENT_ARRAY_BUFFER, _currentIndexBufferOffset * sizeof(short), _arbitraryIndexBuffer, GL_STREAM_DRAW);
 			}
 
 			for (auto i = _vertexBatches->cbegin(); i < _vertexBatches->cend(); i++) {
@@ -1068,6 +975,7 @@ void Renderer::mapArbitraryBuffers() {
 				batch->vertexBufferHandle = _aBufferVBOs[_vboIndex].buffers[0];
 				batch->indexBufferHandle = _aBufferVBOs[_vboIndex].buffers[1];
 			}
+			nextVBO();
 		}
 	}
 	else {
@@ -1084,22 +992,24 @@ void Renderer::mapArbitraryBuffers() {
 			ssize_t currentIndexBufferOffset = 0;
 			ssize_t nextBufferOffset = _vboByteSlice;
 
-			ssize_t lastVertexEndOffset = 0;
-			ssize_t lastIndexEndOffset = 0;
 			ssize_t vertexSize = 0;
 			ssize_t indexSize = 0;
 
 			VertexBatch* batch = nullptr;
 
+			if (_currentVertexBufferOffset > _vboByteSlice) {
+				vertexSize = 0;
+			}
+
 			for (auto i = _vertexBatches->cbegin(); i < _vertexBatches->cend(); i++) {
 				batch = const_cast<VertexBatch*>(i);
-				ssize_t endOffset = batch->vertexBufferOffsetEnd;
+				ssize_t endOffset = batch->vertexBufferUsageEnd;
 
 				if (endOffset - currentVertexBufferOffset > _vboByteSlice) {
 					glBindBuffer(GL_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[0]);
 					glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
-					glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_DYNAMIC_DRAW);
-					glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_DYNAMIC_DRAW);
+					glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_STREAM_DRAW);
+					glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_STREAM_DRAW);
 
 					currentVertexBufferOffset = batch->vertexBufferOffset;
 					currentIndexBufferOffset = batch->indexBufferOffset;
@@ -1112,21 +1022,22 @@ void Renderer::mapArbitraryBuffers() {
 				batch->indexBufferHandle = _aBufferVBOs[_vboIndex].buffers[1];
 				batch->vertexBufferHandle = _aBufferVBOs[_vboIndex].buffers[0];
 
-				vertexSize += endOffset - lastVertexEndOffset;
-				indexSize += batch->indexBufferOffsetEnd - lastIndexEndOffset;
-
-				lastIndexEndOffset = batch->indexBufferOffsetEnd;
-				lastVertexEndOffset = endOffset;
+				vertexSize += batch->vertexBufferUsageEnd - batch->vertexBufferUsageStart;
+				indexSize += batch->indexBufferUsageEnd - batch->indexBufferUsageStart;
 
 				batch->vertexBufferOffset -= currentVertexBufferOffset;
 				batch->indexBufferOffset -= currentIndexBufferOffset;
+				batch->vertexBufferUsageStart -= currentVertexBufferOffset;
+				batch->indexBufferUsageStart -= currentIndexBufferOffset;
+				batch->vertexBufferUsageEnd -= currentVertexBufferOffset;
+				batch->indexBufferUsageEnd -= currentIndexBufferOffset;
 			}
 
 			// submit remaining data
 			glBindBuffer(GL_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[0]);
 			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _aBufferVBOs[_vboIndex].buffers[1]);
-			glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_DYNAMIC_DRAW);
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_DYNAMIC_DRAW);
+			glBufferData(GL_ARRAY_BUFFER, vertexSize, _arbitraryVertexBuffer + currentVertexBufferOffset, GL_STREAM_DRAW);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexSize * sizeof(short), (_arbitraryIndexBuffer + currentIndexBufferOffset), GL_STREAM_DRAW);
 			nextVBO();
 		}
 	}
@@ -1154,24 +1065,31 @@ void Renderer::drawBatchedArbitaryVertices() {
 				glBindBuffer(GL_ARRAY_BUFFER, batch->vertexBufferHandle);
 				glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, batch->indexBufferHandle);
 			}
-			batch->material->_vertexAttribFormat.apply((GLvoid*)batch->vertexBufferOffset);
+			batch->material->_vertexStreamAttributes.apply((GLvoid*)batch->vertexBufferOffset);
 		}
 		if (bindMaterial) {
 			batch->material->apply(avc->_mv);
 		}
 
 		bindMaterial = applyVertexAttribFormat = bindBuffer = false;
-		indexToDraw += avc->_info.indexCount;
 		_currentDrawnRenderCommands++;
 		avcPtr++;
 		if (_currentDrawnRenderCommands >= batch->endRCIndex) {
-			if (indexToDraw > 0)
-			{
-				glDrawElements((GLenum)batch->material->_primitiveType, (GLsizei)indexToDraw, GL_UNSIGNED_SHORT, (GLvoid*)(_startDrawIndex*sizeof(_arbitraryIndexBuffer[0])));
+			if (batch->indexed) {
+				indexToDraw = batch->indexBufferUsageEnd - batch->indexBufferUsageStart;
+				glDrawElements(
+					(GLenum)batch->material->_primitiveType,
+					(GLsizei)(indexToDraw),
+					GL_UNSIGNED_SHORT,
+					(GLvoid*)(batch->indexBufferUsageStart*sizeof(_arbitraryIndexBuffer[0])));
 				_drawnBatches++;
 				_drawnVertices += indexToDraw;
-				_startDrawIndex += indexToDraw;
-				indexToDraw = 0;
+			}
+			else {
+				indexToDraw = (batch->vertexBufferUsageEnd - batch->vertexBufferUsageStart) / batch->material->_vertexStreamAttributes.stride;
+				glDrawArrays((GLenum)batch->material->_primitiveType, 0, indexToDraw);
+				_drawnBatches++;
+				_drawnVertices += indexToDraw;
 			}
 			_currentDrawnVertexBatches++;
 
@@ -1193,15 +1111,6 @@ void Renderer::drawBatchedArbitaryVertices() {
 			batch = newBatch;
 			bindMaterial = true;
 		}
-	}
-
-	//Draw any remaining batches
-	if (indexToDraw > 0)
-	{
-		glDrawElements((GLenum)batch->material->_primitiveType, (GLsizei)indexToDraw, GL_UNSIGNED_SHORT, (GLvoid*)(_startDrawIndex*sizeof(_arbitraryIndexBuffer[0])));
-		_drawnBatches++;
-		_drawnVertices += indexToDraw;
-		_startDrawIndex += indexToDraw;
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -1226,14 +1135,6 @@ void Renderer::flush3D()
 		_lastBatchedMeshCommand->postBatchDraw();
 		_lastBatchedMeshCommand = nullptr;
 	}
-}
-
-void Renderer::flushQuads()
-{
-}
-
-void Renderer::flushTriangles()
-{
 }
 
 void Renderer::flushArbitaryVertices() {
